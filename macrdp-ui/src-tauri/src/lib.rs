@@ -1,25 +1,21 @@
-mod cli_manager;
 mod commands;
 mod database;
-mod ipc_client;
+mod event_bridge;
 mod permissions;
 mod state;
 mod tray;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 
-use cli_manager::CliManager;
 use database::Database;
-use ipc_client::IpcClient;
 
 pub fn run() {
     // 初始化日志输出到 stderr（开发模式下可见）
     tracing_subscriber::fmt()
-        .with_env_filter("macrdp_ui=debug,info")
+        .with_env_filter("macrdp_ui=debug,macrdp_core=debug,info")
         .init();
 
     tracing::info!("macrdp-ui starting...");
@@ -38,24 +34,12 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // Initialize application state
+            // Initialize application state (includes SharedServerHandle)
             state::init_app_state(&handle)?;
-
-            // CLI manager for controlling the macrdp server process
-            let socket_path = dirs::runtime_dir()
-                .or_else(dirs::cache_dir)
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join("macrdp.sock");
-            let cli_manager = Arc::new(CliManager::new(socket_path));
-            app.manage(cli_manager);
-
-            // IPC client for communicating with the server
-            let ipc_client = Arc::new(IpcClient::new());
-            app.manage(ipc_client);
 
             // Database for logs and history
             let db_path = dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join("macrdp")
                 .join("macrdp.db");
             if let Some(parent) = db_path.parent() {

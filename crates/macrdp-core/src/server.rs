@@ -74,15 +74,18 @@ impl ServerHandle {
         }
         self.shutdown_notify.notify_waiters();
 
-        // Wait for server thread to finish
-        if let Some(thread) = self.server_thread.lock().unwrap().take() {
+        // Extract thread handle from mutex *before* the await point so that
+        // the MutexGuard is dropped and the future remains Send.
+        let thread = self.server_thread.lock().unwrap().take();
+        if let Some(thread) = thread {
             let _ = tokio::task::spawn_blocking(move || {
                 let _ = thread.join();
             })
             .await;
         }
         // Cancel metrics task
-        if let Some(task) = self.metrics_task.lock().unwrap().take() {
+        let task = self.metrics_task.lock().unwrap().take();
+        if let Some(task) = task {
             task.abort();
         }
         Ok(())

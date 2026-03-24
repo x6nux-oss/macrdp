@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "bash build-cli.sh debug && npm run dev",
-    "beforeBuildCommand": "bash build-cli.sh && npm run build"
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "withGlobalTauri": false,
@@ -51,9 +51,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": [
-      "binaries/macrdp-server"
-    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

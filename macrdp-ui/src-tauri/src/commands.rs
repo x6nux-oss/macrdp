@@ -4,101 +4,50 @@ use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
 
-use crate::cli_manager::CliManager;
 use crate::database::Database;
-use crate::ipc_client::IpcClient;
+use crate::event_bridge::TauriEventBridge;
 use crate::state::AppState;
 
 #[tauri::command]
 pub async fn start_server(
     app: tauri::AppHandle,
-    cli: State<'_, Arc<CliManager>>,
-    ipc: State<'_, Arc<IpcClient>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let socket_path = cli.socket_path().clone();
-    tracing::info!("start_server called, socket_path={:?}", socket_path);
+    tracing::info!("start_server called");
 
-    // Check if already running via our managed child process
-    if cli.is_running().await {
-        tracing::info!("CLI already running, checking IPC connection");
-        // Already running, ensure IPC is connected
-        if ipc.send_command("").await.is_err() {
-            // IPC not connected, try to connect
-            let _ = ipc.connect(&socket_path, app.clone()).await;
-        }
-        return Ok(());
-    }
-
-    // Check if the socket file exists (could be stale or another instance)
-    if socket_path.exists() {
-        match tokio::net::UnixStream::connect(&socket_path).await {
-            Ok(_stream) => {
-                // Socket is live — another CLI instance is already running.
-                // Just connect our IPC client to it.
-                ipc.connect(&socket_path, app.clone()).await?;
-
-                // Update status to reflect running state
-                {
-                    let mut status = state.status.lock().await;
-                    status.running = true;
-                    status.state = "running".to_string();
-                }
-                let _ = app.emit("server-status", &*state.status.lock().await);
-                return Ok(());
-            }
-            Err(_) => {
-                // Stale socket file — remove it before spawning
-                let _ = std::fs::remove_file(&socket_path);
-            }
-        }
-    }
-
-    // Spawn the CLI process
-    tracing::info!("Spawning CLI process...");
-    cli.start().await.map_err(|e| {
-        tracing::error!("CLI start failed: {}", e);
-        e
-    })?;
-    tracing::info!("CLI process spawned, waiting for socket...");
-
-    // Wait briefly for the server to create its IPC socket
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // Connect IPC client
-    let ipc_ref = Arc::clone(&*ipc);
-    let socket = socket_path.clone();
-    let app_handle = app.clone();
-
-    // Spawn a background task that connects with retry
-    tokio::spawn(async move {
-        for attempt in 0..10 {
-            match ipc_ref.connect(&socket, app_handle.clone()).await {
-                Ok(()) => {
-                    tracing::info!("IPC connected on attempt {}", attempt + 1);
-                    return;
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        "IPC connect attempt {} failed: {}",
-                        attempt + 1,
-                        e
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                }
-            }
-        }
-        tracing::error!("Failed to connect IPC after 10 attempts");
-    });
-
-    // Update status to starting
+    // Check if already running
     {
-        let mut status = state.status.lock().await;
-        status.running = true;
-        status.state = "starting".to_string();
-        status.pid = cli.pid().await;
+        let guard = state.server_handle.lock().await;
+        if guard.is_some() {
+            tracing::info!("Server already running");
+            return Ok(());
+        }
     }
-    let _ = app.emit("server-status", &*state.status.lock().await);
+
+    // Load configuration
+    let config = macrdp_core::ServerConfig::load_from_file(None)
+        .map_err(|e| format!("Failed to load config: {}", e))?;
+
+    // Create the event bridge
+    let bridge = TauriEventBridge::new(app.clone());
+
+    // Start the server in-process
+    let handle = macrdp_core::start_server(config, bridge)
+        .await
+        .map_err(|e| format!("Failed to start server: {}", e))?;
+
+    let port = handle.port();
+    tracing::info!(port, "Server started successfully");
+
+    // Store the handle
+    {
+        let mut guard = state.server_handle.lock().await;
+        *guard = Some(handle);
+    }
+
+    // Emit status update
+    let status = state.status.lock().await.clone();
+    let _ = app.emit("server-status", &status);
 
     Ok(())
 }
@@ -106,30 +55,21 @@ pub async fn start_server(
 #[tauri::command]
 pub async fn stop_server(
     app: tauri::AppHandle,
-    cli: State<'_, Arc<CliManager>>,
-    ipc: State<'_, Arc<IpcClient>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    // Try graceful shutdown via IPC first
-    let cmd_id = uuid::Uuid::new_v4().to_string();
-    let shutdown_cmd =
-        serde_json::json!({"id": cmd_id, "cmd": "shutdown"}).to_string();
+    tracing::info!("stop_server called");
 
-    let graceful = ipc.send_command(&shutdown_cmd).await.is_ok();
+    // Take the handle out
+    let handle = {
+        let mut guard = state.server_handle.lock().await;
+        guard.take()
+    };
 
-    if graceful {
-        // Wait up to 2 seconds for process to exit
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if !cli.is_running().await {
-                break;
-            }
-        }
-    }
-
-    // If still running, force kill
-    if cli.is_running().await {
-        cli.stop().await?;
+    if let Some(handle) = handle {
+        handle
+            .stop()
+            .await
+            .map_err(|e| format!("Failed to stop server: {}", e))?;
     }
 
     // Update status
@@ -138,14 +78,20 @@ pub async fn stop_server(
         status.running = false;
         status.state = "stopped".to_string();
         status.uptime_secs = 0;
-        status.pid = None;
     }
-    let _ = app.emit("server-status", &*state.status.lock().await);
+    let _ = app.emit(
+        "server-status",
+        &*state.status.lock().await,
+    );
 
-    // Clean up socket file
-    let socket_path = cli.socket_path();
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(socket_path);
+    // Clear metrics and connections
+    {
+        let mut metrics = state.metrics.lock().await;
+        *metrics = macrdp_core::Metrics::default();
+    }
+    {
+        let mut connections = state.connections.lock().await;
+        connections.clear();
     }
 
     Ok(())
@@ -155,6 +101,15 @@ pub async fn stop_server(
 pub async fn get_server_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
+    // If we have a live handle, refresh from it
+    {
+        let guard = state.server_handle.lock().await;
+        if let Some(ref handle) = *guard {
+            let live_status = handle.status();
+            let mut status = state.status.lock().await;
+            *status = live_status;
+        }
+    }
     let status = state.status.lock().await.clone();
     serde_json::to_value(&status).map_err(|e| e.to_string())
 }
@@ -176,39 +131,24 @@ pub async fn get_connections(
 }
 
 #[tauri::command]
-pub async fn get_permissions(
-    state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
-    let perms = state.permissions.lock().await.clone();
+pub fn get_permissions() -> Result<serde_json::Value, String> {
+    let perms = macrdp_core::permissions::check_permissions();
     serde_json::to_value(&perms).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_config(
-    ipc: State<'_, Arc<IpcClient>>,
-) -> Result<serde_json::Value, String> {
-    let cmd_id = uuid::Uuid::new_v4().to_string();
-    let cmd =
-        serde_json::json!({"id": cmd_id, "cmd": "get_config"}).to_string();
-    ipc.send_command(&cmd).await?;
-    // The response arrives asynchronously via the IPC read loop
-    // and is emitted as an "ipc-response" Tauri event.
-    Ok(serde_json::json!({"status": "requested", "id": cmd_id}))
+pub fn get_config() -> Result<serde_json::Value, String> {
+    let config = macrdp_core::ServerConfig::load_from_file(None)
+        .map_err(|e| format!("Failed to load config: {}", e))?;
+    serde_json::to_value(&config).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn set_config(
-    config: serde_json::Value,
-    ipc: State<'_, Arc<IpcClient>>,
-) -> Result<(), String> {
-    let cmd_id = uuid::Uuid::new_v4().to_string();
-    let cmd = serde_json::json!({
-        "id": cmd_id,
-        "cmd": "set_config",
-        "config": config,
-    })
-    .to_string();
-    ipc.send_command(&cmd).await
+pub fn set_config(config: serde_json::Value) -> Result<(), String> {
+    tracing::info!("set_config called (hot-update TODO): {:?}", config);
+    // Hot config update is a future enhancement.
+    // For now, log the request. Users can edit config.toml and restart.
+    Ok(())
 }
 
 #[tauri::command]
@@ -279,27 +219,17 @@ pub fn open_system_preferences(pane: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn quit_app(
     app: tauri::AppHandle,
-    cli: State<'_, Arc<CliManager>>,
-    ipc: State<'_, Arc<IpcClient>>,
+    state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    // If CLI is running, try graceful shutdown first
-    if cli.is_running().await {
-        let cmd_id = uuid::Uuid::new_v4().to_string();
-        let shutdown_cmd =
-            serde_json::json!({"id": cmd_id, "cmd": "shutdown"}).to_string();
-        let _ = ipc.send_command(&shutdown_cmd).await;
+    // Stop the server if running
+    let handle = {
+        let mut guard = state.server_handle.lock().await;
+        guard.take()
+    };
 
-        // Wait up to 2 seconds for graceful shutdown
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if !cli.is_running().await {
-                break;
-            }
-        }
-
-        // Force kill if still running
-        if cli.is_running().await {
-            let _ = cli.stop().await;
+    if let Some(handle) = handle {
+        if let Err(e) = handle.stop().await {
+            tracing::warn!("Error stopping server during quit: {}", e);
         }
     }
 

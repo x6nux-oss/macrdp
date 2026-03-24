@@ -1,6 +1,8 @@
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 use tauri::{AppHandle, LogicalPosition, Manager};
 
+use macrdp_core::Metrics;
+
 /// Set up the system tray icon event handling.
 ///
 /// The tray icon itself is created from `tauri.conf.json` (id: "main-tray").
@@ -68,16 +70,15 @@ fn position_popover_near_tray(
     }
 }
 
-/// Update the tray icon title to reflect the current server status.
+/// Update the tray icon title to reflect the current server metrics.
 ///
 /// On macOS the tray title is displayed as text next to the icon:
-/// - `"connected"` — show bitrate and latency
-/// - `"running"` / `"stopped"` / default — clear the title
+/// - When there is a connection (bitrate > 0) — show bitrate and latency
+/// - Otherwise — clear the title
 pub fn update_tray_status(
     handle: &AppHandle,
     state: &str,
-    bitrate_kbps: Option<u32>,
-    latency_ms: Option<f64>,
+    metrics: &Metrics,
 ) {
     let Some(tray) = handle.tray_by_id("main-tray") else {
         return;
@@ -85,8 +86,8 @@ pub fn update_tray_status(
 
     match state {
         "connected" => {
-            let mbps = bitrate_kbps.unwrap_or(0) as f64 / 1000.0;
-            let ms = latency_ms.unwrap_or(0.0);
+            let mbps = metrics.bitrate_kbps as f64 / 1000.0;
+            let ms = metrics.latency_ms;
             let title = format!("{:.1} Mbps | {:.0} ms", mbps, ms);
             let _ = tray.set_title(Some(&title));
         }
