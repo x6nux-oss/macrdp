@@ -12,7 +12,7 @@ help:
 	@echo "    make dev-ui           启动 UI 开发模式 (Tauri)"
 	@echo "    make dev-front        仅启动前端 dev server"
 	@echo "    make run-cli          运行 CLI (端口 3389)"
-	@echo "    make run-cli-ipc      运行 CLI + IPC socket"
+
 	@echo "    make check            检查所有编译"
 	@echo ""
 	@echo "  发布:"
@@ -37,9 +37,6 @@ build-cli: link-cli
 run-cli:
 	cargo run -p macrdp-server
 
-run-cli-ipc:
-	cargo run -p macrdp-server -- --ipc-socket /tmp/macrdp.sock
-
 clean-cli:
 	cargo clean
 
@@ -54,7 +51,7 @@ build-ui-rust:
 build-ui-front:
 	cd macrdp-ui && npm run build
 
-dev-ui: build-cli
+dev-ui:
 	cd macrdp-ui && npm run tauri dev
 
 dev-front:
