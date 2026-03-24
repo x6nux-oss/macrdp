@@ -1,6 +1,7 @@
 mod config;
 mod display;
 mod handler;
+mod ipc;
 mod tls;
 
 use anyhow::{Context, Result};
@@ -142,7 +143,7 @@ async fn main() -> Result<()> {
         .build();
 
     // Share GFX state with the server
-    server.set_gfx_state(gfx_state);
+    server.set_gfx_state(Arc::clone(&gfx_state));
 
     // Set credentials — required for RDP authentication
     let (username, password) = match (&config.username, &config.password) {
@@ -177,10 +178,95 @@ async fn main() -> Result<()> {
     }));
     tracing::info!("Authentication configured for user: {}", username);
 
+    // Shutdown channel
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    // Runtime config (hot-updatable via IPC)
+    let runtime_config = Arc::new(tokio::sync::Mutex::new(
+        ipc::RuntimeConfig::from_server_config(&config),
+    ));
+
+    // IPC server (optional — only when --ipc-socket is provided)
+    let ipc_socket_path = cli.ipc_socket.clone();
+    if let Some(ref socket_path) = ipc_socket_path {
+        let (ipc_server, _push_rx, mut cmd_rx) = ipc::IpcServer::new(socket_path.clone());
+        let push_tx = ipc_server.push_sender();
+
+        // Start IPC listener
+        tokio::spawn(async move {
+            if let Err(e) = ipc_server.run().await {
+                tracing::error!("IPC server error: {e}");
+            }
+        });
+
+        // Start command handler
+        let cmd_ctx = ipc::CommandContext {
+            gfx_state: Arc::clone(&gfx_state),
+            runtime_config: Arc::clone(&runtime_config),
+            push_tx: push_tx.clone(),
+            shutdown_tx: shutdown_tx.clone(),
+        };
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                let response = ipc::handle_ipc_command(&cmd, &cmd_ctx).await;
+                // Broadcast response to all connected clients
+                let _ = cmd_ctx.push_tx.send(response);
+            }
+        });
+
+        // Start metrics ticker (1-second interval)
+        let metrics_gfx = Arc::clone(&gfx_state);
+        let metrics_push_tx = push_tx.clone();
+        let metrics_runtime = Arc::clone(&runtime_config);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            let mut prev_bytes_sent: u64 = 0;
+            loop {
+                interval.tick().await;
+                let (latency_ms, bytes_sent) = {
+                    let gfx = metrics_gfx.lock().unwrap();
+                    (
+                        gfx.rtt_ewma_ms,
+                        gfx.total_bytes_sent,
+                    )
+                };
+                let fps = {
+                    let rc = metrics_runtime.lock().await;
+                    rc.frame_rate
+                };
+                // Instantaneous bitrate: delta bytes over 1-second tick, converted to kbps
+                let delta_bytes = bytes_sent.saturating_sub(prev_bytes_sent);
+                prev_bytes_sent = bytes_sent;
+                let bitrate_kbps = delta_bytes * 8 / 1000;
+                let _ = metrics_push_tx.send(ipc::IpcPush::Metrics {
+                    fps,
+                    bitrate_kbps,
+                    latency_ms,
+                    bytes_sent,
+                });
+            }
+        });
+
+        tracing::info!(path = %socket_path.display(), "IPC enabled");
+    }
+
     tracing::info!(%bind_addr, "RDP server listening");
     tracing::info!("Connect using an RDP client (e.g., Windows mstsc or Microsoft Remote Desktop)");
 
-    server.run().await.context("RDP server error")?;
+    // Run server with shutdown support
+    tokio::select! {
+        result = server.run() => {
+            result.context("RDP server error")?;
+        }
+        _ = shutdown_rx.recv() => {
+            tracing::info!("Shutdown signal received, stopping server");
+        }
+    }
+
+    // Clean up IPC socket on exit
+    if let Some(ref socket_path) = ipc_socket_path {
+        ipc::cleanup_socket(socket_path);
+    }
 
     Ok(())
 }

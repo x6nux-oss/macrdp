@@ -524,8 +524,8 @@ impl VtEncoder {
         data: &[u8], src_w: u32, src_h: u32, stride: usize,
     ) -> Result<CVPixelBufferRef> {
         let mut pb: CVPixelBufferRef = std::ptr::null_mut();
-        let w = enc_w as usize;
-        let h = enc_h as usize;
+        let _w = enc_w as usize;
+        let _h = enc_h as usize;
         let sw = src_w.min(enc_w) as usize;
         let sh = src_h.min(enc_h) as usize;
 

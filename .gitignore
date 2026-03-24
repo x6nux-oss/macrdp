@@ -21,5 +21,15 @@
 # TLS certificates (generated at runtime)
 Cargo.lock
 config.toml
+.superpowers/
 docs/superpowers/
 tls/
+
+# macrdp-ui (Tauri)
+macrdp-ui/node_modules/
+macrdp-ui/dist/
+macrdp-ui/src-tauri/target/
+# Un-ignore Cargo.lock for the Tauri binary project
+!macrdp-ui/src-tauri/Cargo.lock
+macrdp-ui/src-tauri/macrdp-server
+macrdp-ui/src-tauri/binaries/

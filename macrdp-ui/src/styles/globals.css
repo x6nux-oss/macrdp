@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+@theme {
+  --color-macos-bg: #f5f5f7;
+  --color-macos-card: #ffffff;
+  --color-macos-text: #1d1d1f;
+  --color-macos-secondary: #86868b;
+  --color-macos-border: rgba(0, 0, 0, 0.1);
+  --color-macos-blue: #007aff;
+  --color-macos-green: #28c840;
+  --color-macos-red: #ff3b30;
+  --color-macos-yellow: #ffcc00;
+  --color-macos-orange: #ff9500;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: transparent;
+  overflow: hidden;
+  user-select: none;
+}
+
+.vibrancy-bg {
+  background-color: rgba(246, 246, 246, 0.8);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}

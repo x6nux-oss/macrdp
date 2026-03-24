@@ -20,6 +20,10 @@ pub struct Cli {
     /// Log level: trace, debug, info, warn, error
     #[arg(long)]
     pub log_level: Option<String>,
+
+    /// Unix socket path for IPC communication with UI
+    #[arg(long)]
+    pub ipc_socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
