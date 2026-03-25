@@ -1,16 +1,30 @@
 import { useState } from "react";
-import { Settings, LogOut, FileText } from "lucide-react";
+import {
+  Settings,
+  LogOut,
+  FileText,
+  Play,
+  Square,
+  Monitor,
+  Gauge,
+  Timer,
+  HardDrive,
+  Cpu,
+  Wifi,
+} from "lucide-react";
 import { useServerStatus } from "../hooks/useServerStatus";
 import { useMetrics } from "../hooks/useMetrics";
 import { useConnections } from "../hooks/useConnections";
 import { api } from "../lib/ipc";
 import { formatBytes, formatDuration } from "../lib/format";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 
 const statusDotColor: Record<string, string> = {
   running: "bg-macos-green",
   starting: "bg-macos-blue",
-  stopped: "bg-macos-secondary",
-  error: "bg-macos-red",
+  stopped: "bg-muted-foreground",
+  error: "bg-destructive",
 };
 
 function Popover() {
@@ -60,77 +74,103 @@ function Popover() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div
-              className={`h-2 w-2 rounded-full ${statusDotColor[status.state] ?? "bg-macos-secondary"}`}
+              className={`h-2 w-2 rounded-full ${statusDotColor[status.state] ?? "bg-muted-foreground"}`}
             />
-            <span className="text-sm font-semibold text-macos-text">
+            <span className="text-sm font-semibold text-foreground">
               macrdp
             </span>
             {status.running && status.uptime_secs > 0 && (
-              <span className="text-xs text-macos-secondary">
+              <span className="text-xs text-muted-foreground">
                 {formatDuration(status.uptime_secs)}
               </span>
             )}
           </div>
           <div className="flex items-center gap-1">
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="icon-xs"
               onClick={handleShowMain}
-              className="rounded-md p-1.5 text-macos-secondary hover:bg-black/[0.06] transition-colors"
               title="设置"
             >
-              <Settings size={15} />
-            </button>
-            <button
-              type="button"
+              <Settings className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="destructive"
+              size="icon-xs"
               onClick={handleQuit}
-              className="rounded-md p-1.5 text-macos-red bg-macos-red/10 hover:bg-macos-red/20 transition-colors"
               title="退出"
             >
-              <LogOut size={15} />
-            </button>
+              <LogOut className="h-3.5 w-3.5" />
+            </Button>
           </div>
         </div>
 
-        {/* Metrics row */}
+        {/* Metrics row - primary */}
         <div className="grid grid-cols-4 gap-1.5">
-          <div className="flex flex-col items-center justify-center rounded-md bg-black/[0.04] py-2 px-1">
-            <span className="text-sm font-semibold text-macos-text">
+          <div className="flex flex-col items-center justify-center rounded-md bg-muted/50 py-2 px-1">
+            <span className="text-sm font-semibold text-foreground">
               {metricsAvailable ? metrics.fps : "--"}
             </span>
-            <span className="text-[10px] text-macos-secondary">FPS</span>
+            <span className="text-[10px] text-muted-foreground">FPS</span>
           </div>
-          <div className="flex flex-col items-center justify-center rounded-md bg-black/[0.04] py-2 px-1">
-            <span className="text-sm font-semibold text-macos-text">
+          <div className="flex flex-col items-center justify-center rounded-md bg-muted/50 py-2 px-1">
+            <span className="text-sm font-semibold text-foreground">
               {metricsAvailable
                 ? (metrics.bitrate_kbps / 1000).toFixed(1)
                 : "--"}
             </span>
-            <span className="text-[10px] text-macos-secondary">Mbps</span>
+            <span className="text-[10px] text-muted-foreground">Mbps</span>
           </div>
-          <div className="flex flex-col items-center justify-center rounded-md bg-black/[0.04] py-2 px-1">
-            <span className="text-sm font-semibold text-macos-text">
+          <div className="flex flex-col items-center justify-center rounded-md bg-muted/50 py-2 px-1">
+            <span className="text-sm font-semibold text-foreground">
               {metricsAvailable ? metrics.latency_ms : "--"}
             </span>
-            <span className="text-[10px] text-macos-secondary">ms</span>
+            <span className="text-[10px] text-muted-foreground">RTT ms</span>
           </div>
-          <div className="flex flex-col items-center justify-center rounded-md bg-black/[0.04] py-2 px-1">
-            <span className="text-sm font-semibold text-macos-text">
+          <div className="flex flex-col items-center justify-center rounded-md bg-muted/50 py-2 px-1">
+            <span className="text-sm font-semibold text-foreground">
               {metricsAvailable ? formatBytes(metrics.bytes_sent) : "--"}
             </span>
-            <span className="text-[10px] text-macos-secondary">流量</span>
+            <span className="text-[10px] text-muted-foreground">流量</span>
           </div>
         </div>
 
-        {/* Divider */}
-        <div className="h-px bg-black/10" />
+        {/* Metrics row - secondary (encode_ms, net_ms) */}
+        {metricsAvailable && (
+          <div className="grid grid-cols-3 gap-1.5">
+            <div className="flex items-center gap-1.5 rounded-md bg-muted/30 px-2 py-1.5">
+              <Cpu className="h-3 w-3 text-muted-foreground" />
+              <div className="flex flex-col">
+                <span className="text-xs font-medium text-foreground">{metrics.encode_ms}ms</span>
+                <span className="text-[9px] text-muted-foreground">编码</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 rounded-md bg-muted/30 px-2 py-1.5">
+              <Wifi className="h-3 w-3 text-muted-foreground" />
+              <div className="flex flex-col">
+                <span className="text-xs font-medium text-foreground">{metrics.net_ms}ms</span>
+                <span className="text-[9px] text-muted-foreground">网络</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 rounded-md bg-muted/30 px-2 py-1.5">
+              <Gauge className="h-3 w-3 text-muted-foreground" />
+              <div className="flex flex-col">
+                <span className="text-xs font-medium text-foreground">{metrics.network_quality}/5</span>
+                <span className="text-[9px] text-muted-foreground">质量</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <Separator />
 
         {/* Connection list */}
         <div>
-          <div className="mb-1.5 text-xs text-macos-secondary">
+          <div className="mb-1.5 text-xs text-muted-foreground">
             连接 ({connections.length})
           </div>
           {connections.length === 0 ? (
-            <div className="text-center text-xs text-macos-secondary py-2">
+            <div className="text-center text-xs text-muted-foreground py-2">
               暂无连接
             </div>
           ) : (
@@ -143,18 +183,18 @@ function Popover() {
                 return (
                   <div
                     key={`${conn.client_ip}-${conn.connected_at}`}
-                    className="flex items-center justify-between text-xs px-2 py-1.5 rounded-md bg-black/[0.03]"
+                    className="flex items-center justify-between text-xs px-2 py-1.5 rounded-md bg-muted/30"
                   >
                     <div className="flex items-center gap-1.5 min-w-0">
                       <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-macos-green" />
-                      <span className="truncate text-macos-text font-medium">
+                      <span className="truncate text-foreground font-medium">
                         {conn.client_name || conn.client_ip}
                       </span>
-                      <span className="shrink-0 text-macos-secondary">
+                      <span className="shrink-0 text-muted-foreground">
                         {formatDuration(durationSecs)}
                       </span>
                     </div>
-                    <span className="shrink-0 ml-2 text-macos-secondary">
+                    <span className="shrink-0 ml-2 text-muted-foreground">
                       {formatBytes(conn.bytes_total)}
                     </span>
                   </div>
@@ -164,7 +204,7 @@ function Popover() {
                 <button
                   type="button"
                   onClick={handleShowMain}
-                  className="w-full text-center text-xs text-macos-blue hover:underline py-0.5"
+                  className="w-full text-center text-xs text-primary hover:underline py-0.5"
                 >
                   +{extraCount} 更多
                 </button>
@@ -173,38 +213,40 @@ function Popover() {
           )}
         </div>
 
-        {/* Divider */}
-        <div className="h-px bg-black/10" />
+        <Separator />
 
         {/* Action buttons row */}
         <div className="grid grid-cols-3 gap-2">
-          <button
-            type="button"
+          <Button
+            variant={status.running ? "destructive" : "default"}
+            size="sm"
             disabled={toggling || status.state === "starting"}
             onClick={handleToggle}
-            className={`rounded-md py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-50 ${
-              status.running
-                ? "bg-macos-red hover:opacity-80"
-                : "bg-macos-green hover:opacity-80"
-            }`}
+            className="w-full"
           >
-            {status.running ? "停止" : "启动"}
-          </button>
-          <button
-            type="button"
+            {status.running ? (
+              <><Square className="h-3 w-3" /> 停止</>
+            ) : (
+              <><Play className="h-3 w-3" /> 启动</>
+            )}
+          </Button>
+          <Button
+            size="sm"
             onClick={handleShowMain}
-            className="rounded-md bg-macos-blue py-1.5 text-xs font-medium text-white hover:opacity-80 transition-opacity"
+            className="w-full"
           >
+            <Monitor className="h-3 w-3" />
             主窗口
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={handleShowLogs}
-            className="flex items-center justify-center gap-1 rounded-md bg-black/[0.06] py-1.5 text-xs font-medium text-macos-text hover:bg-black/[0.1] transition-colors"
+            className="w-full"
           >
-            <FileText size={12} />
+            <FileText className="h-3 w-3" />
             日志
-          </button>
+          </Button>
         </div>
       </div>
     </div>

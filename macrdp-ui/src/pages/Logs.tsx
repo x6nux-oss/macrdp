@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect, useMemo } from "react";
+import { Search, ArrowDownToLine, Trash2 } from "lucide-react";
 import { useLogs } from "../hooks/useLogs";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import type { LogEntry } from "../lib/types";
 
 const LEVELS = ["trace", "debug", "info", "warn", "error"] as const;
@@ -83,7 +86,7 @@ function Logs() {
               className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
                 enabledLevels.has(level)
                   ? levelBadgeColors[level]
-                  : "border-black/10 bg-black/[0.04] text-macos-secondary opacity-40"
+                  : "border-black/10 bg-black/[0.04] text-muted-foreground opacity-40"
               }`}
             >
               {level.toUpperCase()}
@@ -92,39 +95,40 @@ function Logs() {
         </div>
 
         {/* Keyword search */}
-        <input
-          type="text"
-          placeholder="搜索日志..."
-          value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
-          className="flex-1 rounded-lg border border-black/10 bg-white px-3 py-1.5 text-sm text-macos-text outline-none placeholder:text-macos-secondary focus:border-macos-blue focus:ring-1 focus:ring-macos-blue/30"
-        />
+        <div className="relative flex-1">
+          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="text"
+            placeholder="搜索日志..."
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            className="pl-8"
+          />
+        </div>
 
         {/* Auto-scroll toggle */}
-        <button
-          type="button"
+        <Button
+          variant={autoScroll ? "default" : "outline"}
+          size="sm"
           onClick={() => setAutoScroll(!autoScroll)}
-          className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
-            autoScroll
-              ? "border-macos-blue/20 bg-macos-blue/10 text-macos-blue"
-              : "border-black/10 bg-black/[0.04] text-macos-secondary"
-          }`}
         >
+          <ArrowDownToLine className="h-3.5 w-3.5" />
           {autoScroll ? "自动滚动: 开" : "自动滚动: 关"}
-        </button>
+        </Button>
 
         {/* Clear button */}
-        <button
-          type="button"
+        <Button
+          variant="outline"
+          size="sm"
           onClick={clearLogs}
-          className="rounded-lg border border-black/10 bg-black/[0.04] px-3 py-1.5 text-xs font-medium text-macos-secondary transition-colors hover:bg-black/[0.08]"
         >
+          <Trash2 className="h-3.5 w-3.5" />
           清空
-        </button>
+        </Button>
       </div>
 
       {/* Log count */}
-      <div className="text-xs text-macos-secondary">
+      <div className="text-xs text-muted-foreground">
         {filteredLogs.length} 条日志
         {filteredLogs.length !== logs.length && ` (共 ${logs.length} 条)`}
       </div>
@@ -132,11 +136,11 @@ function Logs() {
       {/* Log list */}
       <div
         ref={scrollRef}
-        className="flex-1 overflow-y-auto rounded-lg bg-black/[0.04] border border-black/10"
+        className="flex-1 overflow-y-auto rounded-lg bg-muted/50 border border-border"
         style={{ minHeight: 0 }}
       >
         {filteredLogs.length === 0 ? (
-          <div className="flex items-center justify-center py-12 text-sm text-macos-secondary">
+          <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
             暂无日志
           </div>
         ) : (
@@ -146,7 +150,7 @@ function Logs() {
                 key={`${log.timestamp}-${i}`}
                 className={`py-0.5 ${levelColors[log.level]}`}
               >
-                <span className="text-macos-secondary">
+                <span className="text-muted-foreground">
                   [{formatTimestamp(log.timestamp)}]
                 </span>{" "}
                 <span className="font-semibold">

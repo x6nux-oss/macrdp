@@ -1,7 +1,10 @@
 import { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { Info } from "lucide-react";
 import { api } from "../lib/ipc";
 import type { PermissionStatus } from "../lib/types";
+import { Button } from "@/components/ui/button";
+import { Alert } from "@/components/ui/alert";
 import PermissionCard from "../components/PermissionCard";
 
 const permissionDefs = [
@@ -10,18 +13,21 @@ const permissionDefs = [
     name: "屏幕录制",
     description: "用于捕获屏幕内容",
     pane: "screen_capture",
+    iconKey: "screen_capture" as const,
   },
   {
     key: "accessibility" as keyof PermissionStatus,
     name: "辅助功能",
     description: "用于注入键盘和鼠标事件",
     pane: "accessibility",
+    iconKey: "accessibility" as const,
   },
   {
     key: "microphone" as keyof PermissionStatus,
     name: "麦克风",
     description: "用于音频转发（Phase 3）",
     pane: "microphone",
+    iconKey: "microphone" as const,
   },
 ];
 
@@ -35,10 +41,10 @@ function Permissions() {
     // Initial fetch
     api.getPermissions().then(setPerms).catch(console.error);
 
-    // Poll every 2 seconds
+    // Poll every 5 seconds
     const interval = setInterval(() => {
       api.getPermissions().then(setPerms).catch(console.error);
-    }, 2000);
+    }, 5000);
 
     return () => clearInterval(interval);
   }, []);
@@ -49,14 +55,15 @@ function Permissions() {
   return (
     <div className="space-y-6">
       {firstLaunch && (
-        <div className="rounded-lg bg-macos-blue/10 border border-macos-blue/20 px-4 py-3">
-          <h2 className="text-sm font-medium text-macos-text">
+        <Alert>
+          <Info className="h-4 w-4" />
+          <span className="text-sm font-medium">
             首次使用需要授权以下权限
-          </h2>
-        </div>
+          </span>
+        </Alert>
       )}
 
-      <h1 className="text-lg font-semibold text-macos-text">
+      <h1 className="text-lg font-semibold text-foreground">
         系统权限
       </h1>
 
@@ -68,27 +75,25 @@ function Permissions() {
             description={def.description}
             granted={perms?.[def.key] ?? false}
             pane={def.pane}
+            iconKey={def.iconKey}
           />
         ))}
       </div>
 
       {firstLaunch && (
         <div className="flex gap-3">
-          <button
-            type="button"
+          <Button
             disabled={!allRequiredGranted}
             onClick={() => navigate("/")}
-            className="rounded-lg bg-macos-blue px-6 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-80 disabled:opacity-40"
           >
             继续
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="outline"
             onClick={() => navigate("/")}
-            className="rounded-lg bg-black/[0.06] px-6 py-2.5 text-sm font-medium text-macos-text transition-opacity hover:opacity-80"
           >
             跳过
-          </button>
+          </Button>
         </div>
       )}
     </div>
