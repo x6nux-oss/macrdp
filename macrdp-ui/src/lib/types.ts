@@ -8,9 +8,15 @@ export interface ServerStatus {
 export interface Metrics {
   fps: number;
   bitrate_kbps: number;
-  latency_ms: number;
+  latency_ms: number;  // JSON field name (backend uses serde rename from rtt_ms)
   bytes_sent: number;
   timestamp: number;
+  // New fields
+  encode_ms: number;
+  net_ms: number;
+  last_frame_bytes: number;
+  network_quality: number;
+  pending_acks: number;
 }
 
 export interface Connection {
@@ -48,15 +54,20 @@ export interface TrafficStats {
   connection_count: number;
 }
 
-export interface ServerConfig {
+export interface UiConfig {
   port: number;
   frame_rate: number;
-  width: number;
-  height: number;
+  bitrate_mbps: number;
+  encoder: string;
+  chroma_mode: string;
   bind_address: string;
   max_connections: number;
+  idle_timeout_secs: number;
+  username: string;
+  password: string;
+  hidpi_scale: number;
+  show_cursor: boolean;
   log_level: string;
-  tls_cert_path: string;
-  tls_key_path: string;
-  bitrate_mbps: number;
+  theme: string;
+  autostart: boolean;
 }

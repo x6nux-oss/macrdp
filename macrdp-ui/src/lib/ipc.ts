@@ -7,7 +7,7 @@ import type {
   PermissionStatus,
   ConnectionHistory,
   TrafficStats,
-  ServerConfig,
+  UiConfig,
 } from "./types";
 
 export const api = {
@@ -17,7 +17,7 @@ export const api = {
   getMetrics: () => invoke<Metrics>("get_metrics"),
   getConnections: () => invoke<Connection[]>("get_connections"),
   getPermissions: () => invoke<PermissionStatus>("get_permissions"),
-  getConfig: () => invoke<ServerConfig>("get_config"),
+  getConfig: () => invoke<UiConfig>("get_config"),
   setConfig: (key: string, value: unknown) =>
     invoke<{ restart_required: boolean }>("set_config", { key, value }),
   getLogs: (limit?: number) =>
