@@ -8,6 +8,8 @@ use tokio::sync::Mutex;
 
 use macrdp_core::ServerHandle;
 
+use crate::ui_config::UiConfig;
+
 // Re-export macrdp-core types that the UI serializes to the frontend.
 // We keep a local Connection struct because macrdp-core doesn't track per-connection bytes_total.
 pub use macrdp_core::{LogEntry, Metrics, ServerStatus};
@@ -31,6 +33,7 @@ pub struct AppState {
     pub connections: Mutex<Vec<Connection>>,
     pub logs: Mutex<VecDeque<LogEntry>>,
     pub server_handle: SharedServerHandle,
+    pub ui_config: Mutex<UiConfig>,
 }
 
 impl AppState {
@@ -41,6 +44,7 @@ impl AppState {
             connections: Mutex::new(Vec::new()),
             logs: Mutex::new(VecDeque::new()),
             server_handle: Arc::new(Mutex::new(None)),
+            ui_config: Mutex::new(UiConfig::load().unwrap_or_default()),
         }
     }
 }

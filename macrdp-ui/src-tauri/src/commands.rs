@@ -4,9 +4,17 @@ use tauri::Emitter;
 use tauri::Manager;
 use tauri::State;
 
+use serde::Serialize;
+
 use crate::database::Database;
 use crate::event_bridge::TauriEventBridge;
 use crate::state::AppState;
+
+/// Response from `set_config` indicating whether the server must be restarted.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetConfigResponse {
+    pub restart_required: bool,
+}
 
 #[tauri::command]
 pub async fn start_server(
@@ -24,9 +32,8 @@ pub async fn start_server(
         }
     }
 
-    // Load configuration
-    let config = macrdp_core::ServerConfig::load_from_file(None)
-        .map_err(|e| format!("Failed to load config: {}", e))?;
+    // Load configuration from UI config
+    let config = state.ui_config.lock().await.to_server_config();
 
     // Create the event bridge
     let bridge = TauriEventBridge::new(app.clone());
@@ -137,18 +144,33 @@ pub fn get_permissions() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-pub fn get_config() -> Result<serde_json::Value, String> {
-    let config = macrdp_core::ServerConfig::load_from_file(None)
-        .map_err(|e| format!("Failed to load config: {}", e))?;
+pub async fn get_config(
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let config = state.ui_config.lock().await.clone();
     serde_json::to_value(&config).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn set_config(config: serde_json::Value) -> Result<(), String> {
-    tracing::info!("set_config called (hot-update TODO): {:?}", config);
-    // Hot config update is a future enhancement.
-    // For now, log the request. Users can edit config.toml and restart.
-    Ok(())
+pub async fn set_config(
+    key: String,
+    value: serde_json::Value,
+    state: State<'_, Arc<AppState>>,
+) -> Result<SetConfigResponse, String> {
+    tracing::info!("set_config: key={key}, value={value}");
+
+    let restart_required = {
+        let mut config = state.ui_config.lock().await;
+        let restart = config.set_field(&key, &value)?;
+        config.save()?;
+        restart
+    };
+
+    // TODO: If hot-updatable and the server is running, dispatch ConfigUpdate
+    // via ServerHandle::update_config() once that method is implemented.
+    // For now, hot-update dispatch is deferred.
+
+    Ok(SetConfigResponse { restart_required })
 }
 
 #[tauri::command]

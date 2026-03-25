@@ -4,6 +4,7 @@ mod event_bridge;
 mod permissions;
 mod state;
 mod tray;
+mod ui_config;
 
 use std::sync::Arc;
 

@@ -27,6 +27,7 @@ anyhow = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
+toml = "0.8"
 
 [lib]
 name = "macrdp_ui"
