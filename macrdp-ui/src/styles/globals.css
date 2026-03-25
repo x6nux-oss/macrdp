@@ -5,6 +5,7 @@
   --color-macos-card: #ffffff;
   --color-macos-text: #1d1d1f;
   --color-macos-secondary: #86868b;
+  --color-macos-muted: #aeaeb2;
   --color-macos-border: rgba(0, 0, 0, 0.1);
   --color-macos-blue: #007aff;
   --color-macos-green: #28c840;
@@ -29,4 +30,33 @@ body {
   background-color: rgba(246, 246, 246, 0.8);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
+}
+
+/* Dark mode overrides */
+.dark, [data-theme="dark"] {
+  --color-macos-bg: #09090b;
+  --color-macos-card: rgba(24, 24, 27, 0.85);
+  --color-macos-text: #fafafa;
+  --color-macos-secondary: #a1a1aa;
+  --color-macos-muted: #71717a;
+  --color-macos-border: #27272a;
+  --color-macos-blue: #0a84ff;
+  --color-macos-green: #30d158;
+  --color-macos-red: #ff453a;
+  --color-macos-orange: #ff9f0a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-macos-bg: #09090b;
+    --color-macos-card: rgba(24, 24, 27, 0.85);
+    --color-macos-text: #fafafa;
+    --color-macos-secondary: #a1a1aa;
+    --color-macos-muted: #71717a;
+    --color-macos-border: #27272a;
+    --color-macos-blue: #0a84ff;
+    --color-macos-green: #30d158;
+    --color-macos-red: #ff453a;
+    --color-macos-orange: #ff9f0a;
+  }
 }
