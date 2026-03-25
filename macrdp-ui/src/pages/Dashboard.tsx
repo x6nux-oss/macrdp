@@ -20,6 +20,7 @@ function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<UiConfig | null>(null);
 
+  // Load config on mount for ServerInfoTags
   useEffect(() => {
     api.getConfig().then(setConfig).catch(console.error);
   }, []);
@@ -57,13 +58,13 @@ function Dashboard() {
 
   return (
     <div className="space-y-5">
-      {/* Control bar */}
+      {/* Top control bar: title, uptime dot, stop/start button */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <h1 className="text-lg font-semibold text-macos-text">仪表盘</h1>
+          <h1 className="text-lg font-semibold">仪表盘</h1>
           <StatusBadge status={status.state} />
           {status.running && status.uptime_secs > 0 && (
-            <div className="flex items-center gap-1.5 text-xs text-macos-secondary">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Clock className="h-3 w-3" />
               <span>{formatDuration(status.uptime_secs)}</span>
             </div>
@@ -95,47 +96,43 @@ function Dashboard() {
 
       {/* Error banner */}
       {error && (
-        <div className="rounded-lg border border-macos-red/20 bg-macos-red/10 px-4 py-3 text-sm text-macos-red">
+        <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           <span className="font-medium">操作失败: </span>{error}
         </div>
       )}
 
-      {/* Server info tags */}
+      {/* Static server info tags (encoding protocol, encoder, TLS) */}
       {config && (
-        <ServerInfoTags
-          encoder={config.encoder}
-          chromaMode={config.chroma_mode}
-          tls={!!(config.tls_cert_path && config.tls_key_path)}
-        />
+        <ServerInfoTags config={config} />
       )}
 
-      {/* Metrics strip */}
+      {/* Real-time metrics strip (updated via Tauri metrics event) */}
       {metricsAvailable ? (
         <MetricsStrip metrics={metrics} port={port} />
       ) : (
-        <Card className="bg-macos-card backdrop-blur-xl border-macos-border">
+        <Card>
           <CardContent>
-            <div className="py-6 text-center text-sm text-macos-secondary">
+            <div className="py-6 text-center text-sm text-muted-foreground">
               {status.running ? "等待指标数据..." : "服务未运行"}
             </div>
           </CardContent>
         </Card>
       )}
 
-      {/* Connections section */}
-      <Card className="bg-macos-card backdrop-blur-xl border-macos-border">
+      {/* Active connection list (updated via Tauri connections event) */}
+      <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Monitor className="h-4 w-4 text-macos-secondary" />
+            <Monitor className="h-4 w-4 text-muted-foreground" />
             当前连接
-            <span className="text-sm font-normal text-macos-secondary">
+            <span className="text-sm font-normal text-muted-foreground">
               ({connections.length})
             </span>
           </CardTitle>
         </CardHeader>
         <CardContent>
           {connections.length === 0 ? (
-            <div className="rounded-lg bg-black/[0.04] dark:bg-white/[0.04] py-8 text-center text-sm text-macos-secondary">
+            <div className="rounded-lg bg-muted/40 py-8 text-center text-sm text-muted-foreground">
               暂无连接
             </div>
           ) : (
@@ -143,20 +140,20 @@ function Dashboard() {
               {connections.map((conn) => (
                 <div
                   key={`${conn.client_ip}-${conn.connected_at}`}
-                  className="flex items-center justify-between rounded-lg bg-black/[0.04] dark:bg-white/[0.04] px-4 py-3"
+                  className="flex items-center justify-between rounded-lg bg-muted/40 px-4 py-3"
                 >
                   <div className="flex items-center gap-3">
-                    <div className="h-2 w-2 rounded-full bg-macos-green" />
+                    <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
                     <div>
-                      <span className="text-sm font-medium text-macos-text">
+                      <span className="text-sm font-medium">
                         {conn.client_name || "Unknown"}
                       </span>
-                      <span className="ml-2 text-xs text-macos-secondary">
+                      <span className="ml-2 text-xs text-muted-foreground">
                         {conn.client_ip}
                       </span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-4 text-xs text-macos-secondary">
+                  <div className="flex items-center gap-4 text-xs text-muted-foreground">
                     <span>
                       {formatDuration(
                         Math.floor(
