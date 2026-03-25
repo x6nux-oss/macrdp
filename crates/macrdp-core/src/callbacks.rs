@@ -25,9 +25,21 @@ impl Default for ServerStatus {
 pub struct Metrics {
     pub fps: u32,
     pub bitrate_kbps: u64,
-    pub latency_ms: f64,
+    /// Round-trip time in milliseconds (serialized as "latency_ms" for JSON backward compat)
+    #[serde(rename = "latency_ms")]
+    pub rtt_ms: f64,
     pub bytes_sent: u64,
     pub timestamp: u64,
+    /// Time spent encoding the last frame (milliseconds)
+    pub encode_ms: f64,
+    /// Estimated network-only latency: rtt_ms minus encode_ms (milliseconds)
+    pub net_ms: f64,
+    /// Byte size of the last encoded frame
+    pub last_frame_bytes: u32,
+    /// Smoothed network quality score in [0.0, 1.0]
+    pub network_quality: f32,
+    /// Number of GFX frames awaiting ACK from the client
+    pub pending_acks: u32,
 }
 
 /// Connection event

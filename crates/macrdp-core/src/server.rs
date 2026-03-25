@@ -1,6 +1,6 @@
 //! RDP server lifecycle: start, stop, metrics, connections
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -55,15 +55,21 @@ impl ServerHandle {
     /// Current performance metrics.
     pub fn metrics(&self) -> Metrics {
         let gfx = self.gfx_state.lock().unwrap();
+        let net_ms = (gfx.rtt_ewma_ms - gfx.last_encode_ms).max(0.0);
         Metrics {
             fps: 0, // Actual FPS comes from config/runtime
             bitrate_kbps: 0,
-            latency_ms: gfx.rtt_ewma_ms,
+            rtt_ms: gfx.rtt_ewma_ms,
             bytes_sent: gfx.total_bytes_sent,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            encode_ms: gfx.last_encode_ms,
+            net_ms,
+            last_frame_bytes: gfx.last_frame_bytes,
+            network_quality: gfx.network_quality,
+            pending_acks: gfx.pending_acks,
         }
     }
 
@@ -121,6 +127,40 @@ struct ServerThreadArgs {
     gfx_state: Arc<Mutex<GfxState>>,
     shutdown_notify: Arc<Notify>,
     handler: Arc<dyn ServerEventHandler>,
+}
+
+/// Try to bind to the given address. If the port is in use, try the next 99 ports.
+/// Returns the successfully bound TcpListener and the actual port.
+fn find_available_port(addr: &str, preferred_port: u16) -> Result<(TcpListener, u16)> {
+    for offset in 0..100u16 {
+        let port = preferred_port.checked_add(offset)
+            .context("Port number overflow")?;
+        let bind_addr = format!("{addr}:{port}");
+        match TcpListener::bind(&bind_addr) {
+            Ok(listener) => {
+                if offset > 0 {
+                    tracing::warn!(
+                        preferred = preferred_port,
+                        actual = port,
+                        "Preferred port in use, using alternative"
+                    );
+                }
+                return Ok((listener, port));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                tracing::debug!(port, "Port in use, trying next");
+                continue;
+            }
+            Err(e) => {
+                return Err(e).context(format!("Failed to bind to {bind_addr}"));
+            }
+        }
+    }
+    anyhow::bail!(
+        "No available port found in range {}-{}",
+        preferred_port,
+        preferred_port + 99
+    )
 }
 
 /// Start the RDP server with the given configuration and event handler.
@@ -185,9 +225,13 @@ pub async fn start_server(
     // GFX state (shared between server thread and metrics task)
     let gfx_state = Arc::new(Mutex::new(GfxState::new(width, height, mode_444)));
 
-    let bind_addr: SocketAddr = format!("0.0.0.0:{}", config.port).parse()?;
+    let (listener, port) = find_available_port("0.0.0.0", config.port)?;
+    let bind_addr = listener.local_addr()?;
+    // Drop listener so the RDP server can rebind the same port.
+    // IronRDP's RdpServer::with_addr() binds its own socket; we cannot pass
+    // a pre-bound TcpListener. The TOCTOU window is microsecond-level.
+    drop(listener);
     let shutdown_notify = Arc::new(Notify::new());
-    let port = config.port;
 
     // Pack everything the server thread needs
     let args = ServerThreadArgs {
@@ -228,13 +272,21 @@ pub async fn start_server(
         let mut prev_bytes_sent: u64 = 0;
         loop {
             interval.tick().await;
-            let (latency_ms, bytes_sent) = {
+            let (rtt_ms, bytes_sent, encode_ms, last_frame_bytes, network_quality, pending_acks) = {
                 let gfx = metrics_gfx.lock().unwrap();
-                (gfx.rtt_ewma_ms, gfx.total_bytes_sent)
+                (
+                    gfx.rtt_ewma_ms,
+                    gfx.total_bytes_sent,
+                    gfx.last_encode_ms,
+                    gfx.last_frame_bytes,
+                    gfx.network_quality,
+                    gfx.pending_acks,
+                )
             };
             let delta_bytes = bytes_sent.saturating_sub(prev_bytes_sent);
             prev_bytes_sent = bytes_sent;
             let bitrate_kbps = delta_bytes * 8 / 1000;
+            let net_ms = (rtt_ms - encode_ms).max(0.0);
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -242,9 +294,14 @@ pub async fn start_server(
             handler_for_metrics.on_metrics(Metrics {
                 fps,
                 bitrate_kbps,
-                latency_ms,
+                rtt_ms,
                 bytes_sent,
                 timestamp,
+                encode_ms,
+                net_ms,
+                last_frame_bytes,
+                network_quality,
+                pending_acks,
             });
         }
     });
@@ -326,6 +383,7 @@ fn run_server_thread(args: ServerThreadArgs) {
             args.mode_444,
             bitrate_override,
             Arc::clone(&args.gfx_state),
+            args.config.show_cursor.unwrap_or(false),
         );
 
         // Build RDP server (this is the !Send type)
