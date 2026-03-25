@@ -9,6 +9,8 @@ import Statistics from "./pages/Statistics";
 import About from "./pages/About";
 import Popover from "./pages/Popover";
 import { api } from "./lib/ipc";
+import { ThemeProvider } from "./contexts/ThemeContext";
+import ThemeToggle from "./components/ThemeToggle";
 
 function MainLayout() {
   const [initialized, setInitialized] = useState(false);
@@ -57,16 +59,19 @@ function MainLayout() {
           <Route path="/about" element={<About />} />
         </Routes>
       </main>
+      <ThemeToggle />
     </div>
   );
 }
 
 function App() {
   return (
-    <Routes>
-      <Route path="/popover" element={<Popover />} />
-      <Route path="/*" element={<MainLayout />} />
-    </Routes>
+    <ThemeProvider>
+      <Routes>
+        <Route path="/popover" element={<Popover />} />
+        <Route path="/*" element={<MainLayout />} />
+      </Routes>
+    </ThemeProvider>
   );
 }
 

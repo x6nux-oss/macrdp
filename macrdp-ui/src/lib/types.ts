@@ -70,4 +70,9 @@ export interface UiConfig {
   log_level: string;
   theme: string;
   autostart: boolean;
+  tls_cert_path: string;
+  tls_key_path: string;
 }
+
+/** @deprecated Use UiConfig instead */
+export type ServerConfig = UiConfig;
