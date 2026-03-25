@@ -11,6 +11,7 @@ import Popover from "./pages/Popover";
 import { api } from "./lib/ipc";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import ThemeToggle from "./components/ThemeToggle";
+import PermissionBanner from "./components/PermissionBanner";
 
 function MainLayout() {
   const [initialized, setInitialized] = useState(false);
@@ -49,16 +50,19 @@ function MainLayout() {
   return (
     <div className="flex h-screen w-screen overflow-hidden">
       <Sidebar />
-      <main className="flex-1 overflow-auto bg-macos-bg p-6">
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="/permissions" element={<Permissions />} />
-          <Route path="/logs" element={<Logs />} />
-          <Route path="/statistics" element={<Statistics />} />
-          <Route path="/about" element={<About />} />
-        </Routes>
-      </main>
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <PermissionBanner />
+        <main className="flex-1 overflow-auto bg-macos-bg p-6">
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/settings" element={<Settings />} />
+            <Route path="/permissions" element={<Permissions />} />
+            <Route path="/logs" element={<Logs />} />
+            <Route path="/statistics" element={<Statistics />} />
+            <Route path="/about" element={<About />} />
+          </Routes>
+        </main>
+      </div>
       <ThemeToggle />
     </div>
   );
