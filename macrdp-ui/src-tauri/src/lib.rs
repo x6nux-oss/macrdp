@@ -38,6 +38,12 @@ pub fn run() {
             // Initialize application state (includes SharedServerHandle)
             state::init_app_state(&handle)?;
 
+            // Request permissions proactively on startup (non-blocking)
+            std::thread::spawn(|| {
+                let perms = macrdp_core::permissions::request_permissions();
+                tracing::info!(?perms, "Startup permission request completed");
+            });
+
             // Database for logs and history
             let db_path = dirs::data_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
