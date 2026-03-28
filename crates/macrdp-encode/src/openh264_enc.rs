@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use openh264::encoder::{Encoder, EncoderConfig, FrameType};
-use openh264::formats::YUVBuffer;
+use openh264::formats::YUVSlices;
 
 use crate::{Avc444EncodedFrame, EncodedFrame, Quality, VideoEncoder};
 
@@ -190,10 +190,17 @@ impl VideoEncoder for OpenH264Encoder {
         // Convert visible BGRA area to YUV420
         bgra_to_yuv420_padded(data, width, height, stride, self.width, self.height, &mut self.yuv_buf);
 
-        let yuv = YUVBuffer::from_vec(
-            self.yuv_buf.clone(),
-            self.width as usize,
-            self.height as usize,
+        // Use YUVSlices to borrow yuv_buf directly — avoids cloning ~3.1MB/frame at 1080p
+        let y_size = (self.width * self.height) as usize;
+        let uv_size = (self.width / 2 * self.height / 2) as usize;
+        let (y_plane, uv_rest) = self.yuv_buf.split_at(y_size);
+        let (u_plane, v_plane) = uv_rest.split_at(uv_size);
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let yuv = YUVSlices::new(
+            (y_plane, u_plane, v_plane),
+            (w, h),
+            (w, w / 2, w / 2),
         );
 
         let bitstream = self.encoder.encode(&yuv)
@@ -236,30 +243,44 @@ impl VideoEncoder for OpenH264Encoder {
             &mut bufs.main_view, &mut bufs.aux_view,
         );
 
-        // Step 3: Pack into I420 and encode both streams
-        pack_i420(&bufs.main_view.y, &bufs.main_view.u, &bufs.main_view.v, &mut bufs.main_yuv_buf);
-        let main_yuv = YUVBuffer::from_vec(
-            bufs.main_yuv_buf.clone(),
-            w as usize,
-            h as usize,
-        );
-        let main_bitstream = self.encoder.encode(&main_yuv)
-            .context("OpenH264 main encode failed")?;
+        // Step 3: Pack into I420 and encode both streams using YUVSlices (zero-copy borrow)
         let mut main_nal = Vec::new();
-        main_bitstream.write_vec(&mut main_nal);
-        let main_keyframe = matches!(main_bitstream.frame_type(), FrameType::IDR | FrameType::I);
+        let main_keyframe;
+        let mut aux_nal = Vec::new();
+        let aux_keyframe;
+        pack_i420(&bufs.main_view.y, &bufs.main_view.u, &bufs.main_view.v, &mut bufs.main_yuv_buf);
+        let ww = w as usize;
+        let hh = h as usize;
+        let y_size = ww * hh;
+        let uv_size = (ww / 2) * (hh / 2);
+        {
+            let (y_plane, uv_rest) = bufs.main_yuv_buf.split_at(y_size);
+            let (u_plane, v_plane) = uv_rest.split_at(uv_size);
+            let main_yuv = YUVSlices::new(
+                (y_plane, u_plane, v_plane),
+                (ww, hh),
+                (ww, ww / 2, ww / 2),
+            );
+            let main_bitstream = self.encoder.encode(&main_yuv)
+                .context("OpenH264 main encode failed")?;
+            main_bitstream.write_vec(&mut main_nal);
+            main_keyframe = matches!(main_bitstream.frame_type(), FrameType::IDR | FrameType::I);
+        }
 
         pack_i420(&bufs.aux_view.y, &bufs.aux_view.u, &bufs.aux_view.v, &mut bufs.aux_yuv_buf);
-        let aux_yuv = YUVBuffer::from_vec(
-            bufs.aux_yuv_buf.clone(),
-            w as usize,
-            h as usize,
-        );
-        let aux_bitstream = encoder_aux.encode(&aux_yuv)
-            .context("OpenH264 aux encode failed")?;
-        let mut aux_nal = Vec::new();
-        aux_bitstream.write_vec(&mut aux_nal);
-        let aux_keyframe = matches!(aux_bitstream.frame_type(), FrameType::IDR | FrameType::I);
+        {
+            let (y_plane, uv_rest) = bufs.aux_yuv_buf.split_at(y_size);
+            let (u_plane, v_plane) = uv_rest.split_at(uv_size);
+            let aux_yuv = YUVSlices::new(
+                (y_plane, u_plane, v_plane),
+                (ww, hh),
+                (ww, ww / 2, ww / 2),
+            );
+            let aux_bitstream = encoder_aux.encode(&aux_yuv)
+                .context("OpenH264 aux encode failed")?;
+            aux_bitstream.write_vec(&mut aux_nal);
+            aux_keyframe = matches!(aux_bitstream.frame_type(), FrameType::IDR | FrameType::I);
+        }
 
         tracing::debug!(
             main_bytes = main_nal.len(),
