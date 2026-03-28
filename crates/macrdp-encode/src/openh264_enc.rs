@@ -69,7 +69,7 @@ fn create_oh264_encoder(_width: u32, _height: u32, fps: f32, bitrate: u32) -> Re
         .bitrate(openh264::encoder::BitRate::from_bps(bitrate))
         .max_frame_rate(openh264::encoder::FrameRate::from_hz(fps))
         .rate_control_mode(openh264::encoder::RateControlMode::Quality)
-        .background_detection(false)
+        .background_detection(true)
         .adaptive_quantization(true)
         .qp(openh264::encoder::QpRange::new(18, 36))
         .skip_frames(false)
