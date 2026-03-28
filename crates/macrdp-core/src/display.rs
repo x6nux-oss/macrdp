@@ -73,6 +73,8 @@ pub struct MacDisplay {
     mode_444: bool,
     base_bitrate: u32,
     gfx_state: Arc<Mutex<GfxState>>,
+    /// Whether to include local cursor in captured frames
+    show_cursor: bool,
 }
 
 impl MacDisplay {
@@ -84,6 +86,7 @@ impl MacDisplay {
         mode_444: bool,
         bitrate_override: Option<u32>,
         gfx_state: Arc<Mutex<GfxState>>,
+        show_cursor: bool,
     ) -> Self {
         let base_bitrate = bitrate_override
             .unwrap_or_else(|| macrdp_encode::screen_bitrate(width as u32, height as u32, frame_rate as f32, quality));
@@ -92,7 +95,7 @@ impl MacDisplay {
             width, height,
             max_width: width, max_height: height,
             fixed_resolution,
-            frame_rate, quality, encoder_pref, mode_444, base_bitrate, gfx_state,
+            frame_rate, quality, encoder_pref, mode_444, base_bitrate, gfx_state, show_cursor,
         }
     }
 }
@@ -129,6 +132,7 @@ impl RdpServerDisplay for MacDisplay {
             width: self.width as u32,
             height: self.height as u32,
             frame_rate: self.frame_rate,
+            show_cursor: self.show_cursor,
         };
         let capturer = ScreenCapturer::new(capture_config.clone()).await?;
 
@@ -155,6 +159,7 @@ impl RdpServerDisplay for MacDisplay {
             base_bitrate: self.base_bitrate,
             mode_444: self.mode_444,
             display_frame_count: 0,
+            frame_rate: self.frame_rate,
         }))
     }
 }
@@ -168,6 +173,8 @@ pub struct MacDisplayUpdates {
     base_bitrate: u32,
     mode_444: bool,
     display_frame_count: u64,
+    /// Frame rate used to calculate keyframe interval for skip logic
+    frame_rate: u32,
 }
 
 #[async_trait::async_trait]
@@ -227,6 +234,20 @@ impl MacDisplayUpdates {
                 && state.avc444_enabled;
             (ready, use_444)
         };
+
+        // Skip unchanged frames in GFX path — saves 100% encode cost for static content.
+        // Force periodic keyframe every ~2 seconds for error recovery.
+        if gfx_ready && frame.dirty_rects.is_empty() && self.display_frame_count > 0 {
+            let keyframe_interval = (self.frame_rate as u64 * 2).max(1);
+            if self.display_frame_count % keyframe_interval != 0 {
+                tracing::trace!(
+                    display_frame = self.display_frame_count,
+                    "Skipping unchanged frame (empty dirty_rects)"
+                );
+                self.display_frame_count += 1;
+                return Ok(Some(DisplayUpdate::DefaultPointer));
+            }
+        }
 
         if gfx_ready {
             // GFX H.264 path — always send at capture rate, never block on acks
