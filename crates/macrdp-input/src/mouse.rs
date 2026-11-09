@@ -34,6 +34,10 @@ pub enum MouseButton {
     Left,
     Right,
     Middle,
+    /// XBUTTON1 (side "back" button).
+    Back,
+    /// XBUTTON2 (side "forward" button).
+    Forward,
 }
 
 impl MouseButton {
@@ -41,19 +45,26 @@ impl MouseButton {
         1 << (self as u8)
     }
 
+    /// Side buttons are "other" mouse buttons; the real index goes into
+    /// `MOUSE_EVENT_BUTTON_NUMBER` (see `number`).
     fn cg(self) -> CGMouseButton {
         match self {
             MouseButton::Left => CGMouseButton::Left,
             MouseButton::Right => CGMouseButton::Right,
-            MouseButton::Middle => CGMouseButton::Center,
+            MouseButton::Middle | MouseButton::Back | MouseButton::Forward => CGMouseButton::Center,
         }
+    }
+
+    /// `kCGMouseEventButtonNumber`: 0 left, 1 right, 2 middle, 3 back, 4 forward.
+    fn number(self) -> i64 {
+        self as i64
     }
 
     fn dragged_type(self) -> CGEventType {
         match self {
             MouseButton::Left => CGEventType::LeftMouseDragged,
             MouseButton::Right => CGEventType::RightMouseDragged,
-            MouseButton::Middle => CGEventType::OtherMouseDragged,
+            MouseButton::Middle | MouseButton::Back | MouseButton::Forward => CGEventType::OtherMouseDragged,
         }
     }
 
@@ -63,8 +74,8 @@ impl MouseButton {
             (MouseButton::Left, false) => CGEventType::LeftMouseUp,
             (MouseButton::Right, true) => CGEventType::RightMouseDown,
             (MouseButton::Right, false) => CGEventType::RightMouseUp,
-            (MouseButton::Middle, true) => CGEventType::OtherMouseDown,
-            (MouseButton::Middle, false) => CGEventType::OtherMouseUp,
+            (MouseButton::Middle | MouseButton::Back | MouseButton::Forward, true) => CGEventType::OtherMouseDown,
+            (MouseButton::Middle | MouseButton::Back | MouseButton::Forward, false) => CGEventType::OtherMouseUp,
         }
     }
 }
@@ -129,9 +140,9 @@ impl MouseInjector {
             .map_err(|_| anyhow::anyhow!("Failed to create CGEventSource"))
     }
 
-    /// Highest-priority held button, if any (Left > Right > Middle).
+    /// Highest-priority held button, if any (Left > Right > Middle > Back > Forward).
     fn held_button(&self) -> Option<MouseButton> {
-        [MouseButton::Left, MouseButton::Right, MouseButton::Middle]
+        [MouseButton::Left, MouseButton::Right, MouseButton::Middle, MouseButton::Back, MouseButton::Forward]
             .into_iter()
             .find(|b| self.state.pressed & b.bit() != 0)
     }
@@ -147,7 +158,7 @@ impl MouseInjector {
             .map_err(|_| anyhow::anyhow!("Failed to create mouse move event"))?;
 
         if let Some(b) = self.held_button() {
-            event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, b.cg() as i64);
+            event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, b.number());
             if let Some(lc) = self.state.last_click.filter(|lc| lc.button == b) {
                 event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, lc.count);
             }
@@ -179,7 +190,7 @@ impl MouseInjector {
         let event = CGEvent::new_mouse_event(source, button.down_up_type(pressed), point, button.cg())
             .map_err(|_| anyhow::anyhow!("Failed to create mouse button event"))?;
         event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_count);
-        event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button.cg() as i64);
+        event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button.number());
 
         event.post(CGEventTapLocation::HID);
         tracing::trace!(?button, pressed, x, y, click_count, "Mouse button event");
@@ -268,7 +279,9 @@ mod tests {
 
     #[test]
     fn button_bits_are_distinct() {
-        let bits = [MouseButton::Left.bit(), MouseButton::Right.bit(), MouseButton::Middle.bit()];
-        assert_eq!(bits, [1, 2, 4]);
+        let all = [MouseButton::Left, MouseButton::Right, MouseButton::Middle, MouseButton::Back, MouseButton::Forward];
+        assert_eq!(all.map(MouseButton::bit), [1, 2, 4, 8, 16]);
+        // CGEvent button numbers: side buttons are 3/4 (browsers map them to back/forward).
+        assert_eq!(all.map(MouseButton::number), [0, 1, 2, 3, 4]);
     }
 }

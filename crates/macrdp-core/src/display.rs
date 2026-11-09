@@ -196,7 +196,16 @@ impl RdpServerDisplay for MacDisplay {
         // Read the current audio sender from the shared slot (set by AudioFactory per connection)
         let audio_tx = self.shared_audio_tx.as_ref()
             .and_then(|shared| shared.lock().unwrap().clone());
-        let capturer = ScreenCapturer::new(capture_config.clone(), audio_tx).await?;
+        // SCK refuses to start at the lock screen (and without the TCC grant): serve the session
+        // from the CoreGraphics fallback, which retries SCK every second, instead of refusing
+        // the connection — a locked Mac is exactly when remote access is needed.
+        let capturer = match ScreenCapturer::new(capture_config.clone(), audio_tx).await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("SCStream unavailable at connect ({e:#}) — starting on the CoreGraphics fallback");
+                None
+            }
+        };
 
         let (peer_addr, max_pointer, suppress_notify) = {
             let gfx = self.gfx_state.lock().unwrap();
@@ -258,10 +267,20 @@ fn build_encoder(cfg: EncoderConfig) -> Option<Box<dyn VideoEncoder>> {
 /// `update_configuration` may never call back; the blocking-pool thread stays stuck, the
 /// display loop must not. The capturer bounds the SCK call itself as well — this outer
 /// timeout is a belt-and-braces guard that also covers the blocking-pool hop.
-async fn set_fps_with_timeout(capturer: &ScreenCapturer, fps: u32) -> Result<()> {
+/// `None` (CoreGraphics fallback, no SCStream) is a no-op: the fallback paces itself.
+async fn set_fps_with_timeout(capturer: Option<&ScreenCapturer>, fps: u32) -> Result<()> {
+    let Some(capturer) = capturer else { return Ok(()) };
     match tokio::time::timeout(SET_FPS_TIMEOUT, capturer.set_frame_rate_async(fps)).await {
         Ok(r) => r,
         Err(_) => anyhow::bail!("SCStream frame rate update timed out after {:?}", SET_FPS_TIMEOUT),
+    }
+}
+
+/// Next SCK event; `None` once the stream stopped or when there is none (CG fallback).
+async fn next_capture_event(capturer: &mut Option<ScreenCapturer>) -> Option<macrdp_capture::CaptureEvent> {
+    match capturer {
+        Some(c) => c.next_frame().await,
+        None => None,
     }
 }
 
@@ -312,7 +331,9 @@ const IDLE_IDR_INTERVAL: Duration = Duration::from_secs(10);
 const SCK_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 struct MacDisplayUpdates {
-    capturer: ScreenCapturer,
+    /// `None` = no SCStream (lock screen at connect, failed rebuild): `next_update` serves the
+    /// CoreGraphics fallback and retries SCK every `SCK_RETRY_INTERVAL`.
+    capturer: Option<ScreenCapturer>,
     /// Client-side cursor: pointer PDU on shape change (None = cursor is in the video frame).
     cursor: Option<CursorWatcher>,
     capture_config: CaptureConfig,
@@ -470,7 +491,7 @@ impl RdpServerDisplayUpdates for MacDisplayUpdates {
                 let waited = tokio::select! {
                     biased;
                     p = cursor_changed => Err(p),
-                    r = tokio::time::timeout(timeout, cap.next_frame()) => Ok(r),
+                    r = tokio::time::timeout(timeout, next_capture_event(cap)) => Ok(r),
                 };
                 match waited {
                     Err(Some(ptr)) => return Ok(Some(DisplayUpdate::RGBAPointer(ptr))),
@@ -504,7 +525,7 @@ impl RdpServerDisplayUpdates for MacDisplayUpdates {
                     biased;
                     p = cursor_changed => Err(p),
                     _ = self.suppress_notify.notified(), if self.suppressed => continue,
-                    r = cap.next_frame() => Ok(r),
+                    r = next_capture_event(cap) => Ok(r),
                 };
                 match waited {
                     Err(Some(ptr)) => return Ok(Some(DisplayUpdate::RGBAPointer(ptr))),
@@ -540,7 +561,7 @@ impl RdpServerDisplayUpdates for MacDisplayUpdates {
                             // While suppressed the capturer stays at 1 fps; the restore edge
                             // in `sync_suppressed` applies `last_applied_fps`.
                             if !self.suppressed {
-                                let _ = set_fps_with_timeout(&self.capturer, target_fps).await;
+                                let _ = set_fps_with_timeout(self.capturer.as_ref(), target_fps).await;
                             }
                             self.last_applied_fps = target_fps;
                         }
@@ -572,7 +593,7 @@ impl RdpServerDisplayUpdates for MacDisplayUpdates {
             // Drain anything already buffered and keep only the newest frame — queued
             // frames add latency, but the newest one must never be dropped.
             let mut frame = frame;
-            while let Some(macrdp_capture::CaptureEvent::Frame(mut newer)) = self.capturer.try_next_frame() {
+            while let Some(macrdp_capture::CaptureEvent::Frame(mut newer)) = self.capturer.as_mut().and_then(|c| c.try_next_frame()) {
                 // The older frame is never sent, so its dirty rects must survive into the newer
                 // one (empty = whole frame, which already covers everything).
                 if frame.dirty_rects.is_empty() || newer.dirty_rects.is_empty() {
@@ -603,12 +624,12 @@ impl MacDisplayUpdates {
         self.suppressed = suppressed;
         if suppressed {
             tracing::info!("Client suppressed output — encoding paused, capture at 1 fps");
-            if let Err(e) = set_fps_with_timeout(&self.capturer, 1).await {
+            if let Err(e) = set_fps_with_timeout(self.capturer.as_ref(), 1).await {
                 tracing::warn!("Failed to lower frame rate for suppressed output: {e}");
             }
         } else {
             tracing::info!(fps = self.last_applied_fps, "Client restored output — resuming with keyframe");
-            if let Err(e) = set_fps_with_timeout(&self.capturer, self.last_applied_fps).await {
+            if let Err(e) = set_fps_with_timeout(self.capturer.as_ref(), self.last_applied_fps).await {
                 tracing::warn!("Failed to restore frame rate after suppressed output: {e}");
             }
             self.keyframe_requested = true;
@@ -629,7 +650,7 @@ impl MacDisplayUpdates {
         let capturer = ScreenCapturer::new(self.capture_config.clone(), audio_tx).await?;
         let fps = if self.suppressed { 1 } else { self.last_applied_fps };
         if fps != self.capture_config.frame_rate {
-            if let Err(e) = set_fps_with_timeout(&capturer, fps).await {
+            if let Err(e) = set_fps_with_timeout(Some(&capturer), fps).await {
                 tracing::warn!(fps, "Failed to re-apply frame rate on rebuilt capturer: {e}");
             }
         }
@@ -723,7 +744,7 @@ impl MacDisplayUpdates {
                 self.last_sck_retry = Some(Instant::now());
                 if let Ok(new_capturer) = self.new_capturer().await {
                     tracing::info!("SCStream recovered — switching back from CoreGraphics");
-                    self.capturer = new_capturer;
+                    self.capturer = Some(new_capturer);
                     self.last_sck_retry = None;
                     return Ok(None);
                 }
@@ -826,10 +847,10 @@ impl MacDisplayUpdates {
             self.cache_unsent = false;
         }
         match self.new_capturer().await {
-            Ok(c) => self.capturer = c,
+            Ok(c) => self.capturer = Some(c),
             Err(e) => {
                 tracing::error!("capturer rebuild failed ({e:#}) — closing stream, CG fallback will retry");
-                self.capturer.close();
+                self.capturer = None;
             }
         }
     }
@@ -924,7 +945,7 @@ impl MacDisplayUpdates {
         self.set_encoder_bitrate(decision.bitrate_bps);
 
         if decision.fps != self.last_applied_fps {
-            if let Err(e) = set_fps_with_timeout(&self.capturer, decision.fps).await {
+            if let Err(e) = set_fps_with_timeout(self.capturer.as_ref(), decision.fps).await {
                 tracing::warn!("Failed to update frame rate: {e}");
             } else {
                 self.last_applied_fps = decision.fps;

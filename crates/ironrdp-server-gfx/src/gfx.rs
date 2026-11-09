@@ -198,6 +198,27 @@ fn parse_caps_advertise_lenient(data: &[u8]) -> Option<(Vec<CapabilitySet>, usiz
     Some((known, skipped))
 }
 
+/// `(version rank, AVC420, AVC444)` the server may use when it confirms `cap`; `None` for
+/// versions we cannot confirm. AVC444 needs V10+, V8.1 only allows AVC420 when flagged.
+fn cap_codecs(cap: &CapabilitySet) -> Option<(u8, bool, bool)> {
+    let v10 = |rank, avc: bool| Some((rank, avc, avc));
+    match cap {
+        CapabilitySet::V8 { .. } => Some((0, false, false)),
+        CapabilitySet::V8_1 { flags } => Some((1, flags.contains(CapabilitiesV81Flags::AVC420_ENABLED), false)),
+        CapabilitySet::V10 { flags } => v10(2, !flags.contains(CapabilitiesV10Flags::AVC_DISABLED)),
+        CapabilitySet::V10_1 => v10(3, true),
+        CapabilitySet::V10_2 { flags } => v10(4, !flags.contains(CapabilitiesV10Flags::AVC_DISABLED)),
+        CapabilitySet::V10_3 { flags } => v10(5, !flags.contains(CapabilitiesV103Flags::AVC_DISABLED)),
+        CapabilitySet::V10_4 { flags } => v10(6, !flags.contains(CapabilitiesV104Flags::AVC_DISABLED)),
+        CapabilitySet::V10_5 { flags } => v10(7, !flags.contains(CapabilitiesV104Flags::AVC_DISABLED)),
+        CapabilitySet::V10_6 { flags } | CapabilitySet::V10_6Err { flags } => {
+            v10(8, !flags.contains(CapabilitiesV104Flags::AVC_DISABLED))
+        }
+        CapabilitySet::V10_7 { flags } => v10(9, !flags.contains(CapabilitiesV107Flags::AVC_DISABLED)),
+        CapabilitySet::Unknown(_) => None,
+    }
+}
+
 /// Human-readable `version(flags)` summary of a capability set, for logs.
 fn describe_cap(cap: &CapabilitySet) -> String {
     match cap {
@@ -324,7 +345,7 @@ impl GfxState {
     }
 
     pub fn next_frame_id(&mut self) -> u32 {
-        self.frame_id += 1;
+        self.frame_id = self.frame_id.wrapping_add(1);
         if !self.acks_suspended {
             self.pending_acks += 1;
         }
@@ -332,8 +353,9 @@ impl GfxState {
         if self.start_time.is_none() {
             self.start_time = Some(std::time::Instant::now());
         }
-        // Track instantaneous bitrate per frame
-        if let Some(prev) = self.last_frame_time {
+        // Track instantaneous bitrate per frame (drained by the ACK-driven stats log, so not
+        // while acks are suspended — the samples would pile up for the whole session)
+        if let (Some(prev), false) = (self.last_frame_time, self.acks_suspended) {
             let dt = prev.elapsed().as_secs_f64().max(0.0001);
             let mbps = self.last_frame_bytes as f64 * 8.0 / dt / 1_000_000.0;
             self.bitrate_samples.push(mbps);
@@ -356,10 +378,16 @@ impl GfxState {
     /// Update network quality and RTT based on frame acknowledgment
     pub fn ack_frame(&mut self, ack_frame_id: u32) {
         self.acks_suspended = false;
-        self.last_ack_frame = ack_frame_id;
-        if self.pending_acks > 0 {
-            self.pending_acks -= 1;
+        // Frames decode in order, so an ack for N covers every frame up to N: derive the backlog
+        // from frame ids instead of -1 per ack, which drifts for good after a suspend/resume
+        // (frames sent while suspended get acked but were never counted) or a duplicate ack.
+        // Stale acks and ids we never sent are ignored (wrapping comparison).
+        let newer = (ack_frame_id.wrapping_sub(self.last_ack_frame) as i32) > 0;
+        let sent = (self.frame_id.wrapping_sub(ack_frame_id) as i32) >= 0;
+        if newer && sent {
+            self.last_ack_frame = ack_frame_id;
         }
+        self.pending_acks = self.frame_id.wrapping_sub(self.last_ack_frame);
 
         // Calculate RTT from send timestamp
         let slot = &mut self.frame_send_times[ack_frame_id as usize % SEND_TIME_SLOTS];
@@ -569,7 +597,7 @@ impl GfxHandler {
         }
 
         // Committed by `next_frame_id()` below, once the on-wire bitmap size is known.
-        let frame_id = state.frame_id + 1;
+        let frame_id = state.frame_id.wrapping_add(1);
         if let Err(e) = push_pdu(&mut out, &ServerPdu::StartFrame(StartFramePdu {
             timestamp: Timestamp { milliseconds: 0, seconds: 0, minutes: 0, hours: 0 },
             frame_id,
@@ -637,66 +665,20 @@ impl GfxHandler {
             return Ok(Vec::new());
         }
 
-        let mut best_cap = None;
-
-        for cap in cap_sets {
-            match cap {
-                CapabilitySet::V10_7 { flags } if !flags.contains(CapabilitiesV107Flags::AVC_DISABLED) => {
-                    state.avc420_supported = true;
-                    state.avc444_supported = true;
-                    best_cap = Some(cap.clone());
-                    break;
-                }
-                CapabilitySet::V10_6 { flags } | CapabilitySet::V10_6Err { flags }
-                    if !flags.contains(CapabilitiesV104Flags::AVC_DISABLED) =>
-                {
-                    state.avc420_supported = true;
-                    state.avc444_supported = true;
-                    best_cap = Some(cap.clone());
-                }
-                CapabilitySet::V10_5 { flags } | CapabilitySet::V10_4 { flags }
-                    if !flags.contains(CapabilitiesV104Flags::AVC_DISABLED) =>
-                {
-                    state.avc420_supported = true;
-                    state.avc444_supported = true;
-                    if best_cap.is_none() { best_cap = Some(cap.clone()); }
-                }
-                CapabilitySet::V10_3 { flags }
-                    if !flags.contains(CapabilitiesV103Flags::AVC_DISABLED) =>
-                {
-                    state.avc420_supported = true;
-                    state.avc444_supported = true;
-                    if best_cap.is_none() { best_cap = Some(cap.clone()); }
-                }
-                CapabilitySet::V10_2 { flags } | CapabilitySet::V10 { flags }
-                    if !flags.contains(CapabilitiesV10Flags::AVC_DISABLED) =>
-                {
-                    state.avc420_supported = true;
-                    state.avc444_supported = true;
-                    if best_cap.is_none() { best_cap = Some(cap.clone()); }
-                }
-                CapabilitySet::V10_1 => {
-                    // V10_1 has no AVC_DISABLED flag — always supports AVC
-                    state.avc420_supported = true;
-                    state.avc444_supported = true;
-                    if best_cap.is_none() { best_cap = Some(cap.clone()); }
-                }
-                CapabilitySet::V8_1 { flags }
-                    if flags.contains(CapabilitiesV81Flags::AVC420_ENABLED) =>
-                {
-                    state.avc420_supported = true;
-                    // V8.1 only supports AVC420, not AVC444
-                    if best_cap.is_none() { best_cap = Some(cap.clone()); }
-                }
-                _ => {
-                    if best_cap.is_none() { best_cap = Some(cap.clone()); }
-                }
+        // The confirmed capset alone decides what may be sent (MS-RDPEGFX 3.2.5.x): prefer an
+        // AVC420-capable one, then the highest version. Never mix flags from other capsets.
+        let best = cap_sets
+            .iter()
+            .filter_map(|cap| cap_codecs(cap).map(|codecs| (cap, codecs)))
+            .max_by_key(|&(_, (rank, avc420, _))| (avc420, rank));
+        let confirmed = match best {
+            Some((cap, (_, avc420, avc444))) => {
+                state.avc420_supported = avc420;
+                state.avc444_supported = avc444;
+                cap.clone()
             }
-        }
-
-        let confirmed = best_cap.unwrap_or(CapabilitySet::V8 {
-            flags: ironrdp_pdu::rdp::vc::dvc::gfx::CapabilitiesV8Flags::empty(),
-        });
+            None => CapabilitySet::V8 { flags: ironrdp_pdu::rdp::vc::dvc::gfx::CapabilitiesV8Flags::empty() },
+        };
 
         // One line with everything an issue reporter needs: every advertised capset
         // with raw flags, how many were skipped, what we confirmed, and codec support.
@@ -918,6 +900,11 @@ impl DvcProcessor for GfxHandler {
         info!(channel_id, "GFX channel closed");
         let mut state = self.state.lock().unwrap();
         state.channel_id = None;
+        // Frames in flight on the closed channel will never be acked: a reopened channel must
+        // not start with their backlog (the display would throttle on it).
+        state.last_ack_frame = state.frame_id;
+        state.pending_acks = 0;
+        state.acks_suspended = false;
         state.surface_created = false;
         state.caps_confirmed = false;
         state.avc420_supported = false;
@@ -999,6 +986,38 @@ mod tests {
             }
             other => panic!("unexpected reply {other:?}"),
         }
+    }
+
+    #[test]
+    fn confirms_one_capset_and_takes_codecs_from_it_only() {
+        const V8: u32 = 0x8_0004;
+        const V8_1: u32 = 0x8_0105;
+        const V10: u32 = 0xA_0002;
+        const V10_5: u32 = 0xA_0502;
+        const V10_7: u32 = 0xA_0701;
+        let negotiate = |sets: &[(u32, u32)]| {
+            let (mut h, state) = handler();
+            h.process(7, &wrap_zgfx(&caps_advertise(sets))).unwrap();
+            let s = state.lock().unwrap();
+            (s.confirmed_cap.clone().unwrap(), s.avc420_supported(), s.avc444_supported())
+        };
+        // RDP 8.1 client, ascending order: V8 first must not win while AVC flags come from V8.1.
+        let (cap, avc420, avc444) = negotiate(&[(V8, 0), (V8_1, CapabilitiesV81Flags::AVC420_ENABLED.bits())]);
+        assert_eq!(cap, CapabilitySet::V8_1 { flags: CapabilitiesV81Flags::AVC420_ENABLED });
+        assert!(avc420 && !avc444, "V8.1 allows AVC420 only");
+        // Win10 ≤1803 style list without V10.6/7: highest version, not the first one.
+        let (cap, avc420, avc444) = negotiate(&[(V8, 0), (V10, 0), (V10_5, 0)]);
+        assert!(matches!(cap, CapabilitySet::V10_5 { .. }), "{cap:?}");
+        assert!(avc420 && avc444);
+        // AVC disabled in the newest capset: an older AVC-capable one is confirmed instead.
+        let (cap, avc420, avc444) =
+            negotiate(&[(V10_7, CapabilitiesV107Flags::AVC_DISABLED.bits()), (V10, 0)]);
+        assert!(matches!(cap, CapabilitySet::V10 { .. }), "{cap:?}");
+        assert!(avc420 && avc444);
+        // V8 only: never claim AVC.
+        let (cap, avc420, _) = negotiate(&[(V8, 0)]);
+        assert!(matches!(cap, CapabilitySet::V8 { .. }));
+        assert!(!avc420);
     }
 
     #[test]
@@ -1241,13 +1260,47 @@ mod tests {
             s.next_frame_id();
         }
         assert_eq!(s.pending_acks, 300);
-        s.ack_frame(300);
+        s.ack_frame(299);
         assert!(s.rtt_ewma_ms >= 0.0);
-        assert_eq!(s.pending_acks, 299);
-        // Slot for id 44 was overwritten by 172 and 300; a stale ack must not read it.
+        assert_eq!(s.pending_acks, 1, "ack for 299 covers 1..=299");
+        // Slot for id 44 was overwritten by 172 and 300; a stale ack must not read it,
+        // nor move the backlog backwards.
         let before = s.rtt_ewma_ms;
         s.ack_frame(44);
         assert_eq!(s.rtt_ewma_ms, before);
+        assert_eq!((s.last_ack_frame, s.pending_acks), (299, 1));
+        // An id that was never sent is ignored too.
+        s.ack_frame(5000);
+        assert_eq!((s.last_ack_frame, s.pending_acks), (299, 1));
+    }
+
+    #[test]
+    fn backlog_self_heals_after_suspend_resume_and_channel_reopen() {
+        let mut s = GfxState::new(1, 1, false);
+        for _ in 0..3 {
+            s.next_frame_id();
+        }
+        s.suspend_acks();
+        for _ in 0..10 {
+            s.next_frame_id(); // 4..=13, never counted
+        }
+        // Resume: the client acks frames from the suspended stretch one by one. A -1 per ack
+        // counter would sit at 0 while frames 12 and 13 are still in flight.
+        s.ack_frame(11);
+        assert_eq!(s.pending_acks, 2);
+        s.ack_frame(11); // duplicate
+        assert_eq!(s.pending_acks, 2);
+        s.next_frame_id();
+        assert_eq!(s.pending_acks, 3);
+        s.ack_frame(14);
+        assert_eq!(s.pending_acks, 0);
+
+        let (mut h, state) = handler();
+        for _ in 0..5 {
+            state.lock().unwrap().next_frame_id();
+        }
+        h.close(7);
+        assert_eq!(state.lock().unwrap().pending_acks, 0, "frames of a closed channel are never acked");
     }
 
     #[test]

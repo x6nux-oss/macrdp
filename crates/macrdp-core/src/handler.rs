@@ -41,6 +41,13 @@ impl MouseCoordMapper {
         (mac_x, mac_y)
     }
 
+    /// Clamp an RDP desktop position (e.g. last position + relative delta) into the desktop.
+    pub fn clamp_rdp(&self, x: i32, y: i32) -> (u16, u16) {
+        let s = self.0.lock().unwrap();
+        let clamp = |v: i32, max: f64| v.clamp(0, (max as i32 - 1).max(0)) as u16;
+        (clamp(x, s.rdp_w), clamp(y, s.rdp_h))
+    }
+
     /// RDP pixels per macOS logical point (horizontal).
     pub fn scale(&self) -> f64 {
         let s = self.0.lock().unwrap();
@@ -68,6 +75,8 @@ pub struct MacInputHandler {
     mouse: Option<MouseInjector>,
     last_mouse_x: u16,
     last_mouse_y: u16,
+    /// Last pointer position in RDP desktop pixels (base for relative moves).
+    last_rdp: (u16, u16),
     coord_mapper: MouseCoordMapper,
 }
 
@@ -91,6 +100,7 @@ impl MacInputHandler {
             mouse,
             last_mouse_x: 0,
             last_mouse_y: 0,
+            last_rdp: (0, 0),
             coord_mapper,
         }
     }
@@ -121,7 +131,21 @@ impl RdpServerInputHandler for MacInputHandler {
 
         let result = match event {
             MouseEvent::Move { x, y } => {
+                self.last_rdp = (x, y);
                 let (mx, my) = self.coord_mapper.map(x, y);
+                self.last_mouse_x = mx;
+                self.last_mouse_y = my;
+                m.move_to(mx, my)
+            }
+            // TS_POINTERREL_EVENT (we advertise INPUT_FLAG_MOUSE_RELATIVE): deltas in RDP pixels,
+            // accumulated in RDP space so sub-point moves on HiDPI are not rounded away.
+            MouseEvent::RelMove { x, y } => {
+                let (rx, ry) = self.coord_mapper.clamp_rdp(
+                    i32::from(self.last_rdp.0).saturating_add(x),
+                    i32::from(self.last_rdp.1).saturating_add(y),
+                );
+                self.last_rdp = (rx, ry);
+                let (mx, my) = self.coord_mapper.map(rx, ry);
                 self.last_mouse_x = mx;
                 self.last_mouse_y = my;
                 m.move_to(mx, my)
@@ -144,19 +168,42 @@ impl RdpServerInputHandler for MacInputHandler {
             MouseEvent::MiddleReleased => {
                 m.button_event(MouseButton::Middle, false, self.last_mouse_x, self.last_mouse_y)
             }
+            MouseEvent::Button4Pressed => {
+                m.button_event(MouseButton::Back, true, self.last_mouse_x, self.last_mouse_y)
+            }
+            MouseEvent::Button4Released => {
+                m.button_event(MouseButton::Back, false, self.last_mouse_x, self.last_mouse_y)
+            }
+            MouseEvent::Button5Pressed => {
+                m.button_event(MouseButton::Forward, true, self.last_mouse_x, self.last_mouse_y)
+            }
+            MouseEvent::Button5Released => {
+                m.button_event(MouseButton::Forward, false, self.last_mouse_x, self.last_mouse_y)
+            }
             MouseEvent::VerticalScroll { value } => m.scroll(value, 0),
             MouseEvent::Scroll { x, y } => m.scroll(
                 y.clamp(i16::MIN.into(), i16::MAX.into()) as i16,
                 x.clamp(i16::MIN.into(), i16::MAX.into()) as i16,
             ),
-            _ => {
-                tracing::trace!(?event, "Unhandled mouse event");
-                Ok(())
-            }
         };
 
         if let Err(e) = result {
             tracing::warn!("Mouse injection failed: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MouseCoordMapper;
+
+    #[test]
+    fn relative_moves_clamp_to_desktop() {
+        let m = MouseCoordMapper::new(1920, 1080, 3840, 2160);
+        assert_eq!(m.clamp_rdp(-5, 100), (0, 100));
+        assert_eq!(m.clamp_rdp(5000, 3000), (3839, 2159));
+        // One RDP pixel on a 2x desktop is half a point: tracked in RDP space, two steps = 1 pt.
+        assert_eq!(m.map(1001, 0).0, 500);
+        assert_eq!(m.map(1002, 0).0, 501);
     }
 }

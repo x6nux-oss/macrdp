@@ -198,19 +198,21 @@ impl From<MousePdu> for MouseEvent {
     }
 }
 
+/// TS_POINTERX_EVENT carries only the extended buttons (MS-RDPBCGR 2.2.8.1.1.3.1.1.4):
+/// PTRXFLAGS_BUTTON1/2 are XBUTTON1/XBUTTON2 (back/forward), never left/right.
 impl From<MouseXPdu> for MouseEvent {
     fn from(value: MouseXPdu) -> Self {
         if value.flags.contains(PointerXFlags::BUTTON1) {
             if value.flags.contains(PointerXFlags::DOWN) {
-                MouseEvent::LeftPressed
+                MouseEvent::Button4Pressed
             } else {
-                MouseEvent::LeftReleased
+                MouseEvent::Button4Released
             }
         } else if value.flags.contains(PointerXFlags::BUTTON2) {
             if value.flags.contains(PointerXFlags::DOWN) {
-                MouseEvent::RightPressed
+                MouseEvent::Button5Pressed
             } else {
-                MouseEvent::RightReleased
+                MouseEvent::Button5Released
             }
         } else {
             MouseEvent::Move {
@@ -297,5 +299,19 @@ impl From<ainput::MousePdu> for MouseEvent {
         } else {
             MouseEvent::Move { x: 0, y: 0 }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pointer_x_buttons_are_side_buttons() {
+        let ev = |flags| MouseEvent::from(MouseXPdu { flags, x_position: 5, y_position: 7 });
+        assert!(matches!(ev(PointerXFlags::BUTTON1 | PointerXFlags::DOWN), MouseEvent::Button4Pressed));
+        assert!(matches!(ev(PointerXFlags::BUTTON1), MouseEvent::Button4Released));
+        assert!(matches!(ev(PointerXFlags::BUTTON2 | PointerXFlags::DOWN), MouseEvent::Button5Pressed));
+        assert!(matches!(ev(PointerXFlags::BUTTON2), MouseEvent::Button5Released));
     }
 }

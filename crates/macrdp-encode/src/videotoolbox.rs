@@ -671,6 +671,7 @@ impl VtEncoder {
                 Some(name) => name,
                 None => {
                     VTCompressionSessionInvalidate(session);
+                    CFRelease(session);
                     anyhow::bail!("VT accepted none of High/Main/Baseline H.264 profiles");
                 }
             };
@@ -1318,8 +1319,10 @@ impl VideoEncoder for VtEncoder {
 
 impl Drop for VtEncoder {
     fn drop(&mut self) {
+        // Invalidate stops the session; the +1 from VTCompressionSessionCreate still has to go.
         unsafe {
             VTCompressionSessionInvalidate(self.session);
+            CFRelease(self.session);
         }
     }
 }
@@ -1330,6 +1333,24 @@ mod tests {
 
     /// 4×4 I420 → NV12 UV with a destination stride wider than 2*uv_w: cells interleave
     /// `[u, v]`, padding bytes stay untouched.
+    #[test]
+    fn drop_releases_the_session() {
+        extern "C" {
+            fn CFRetain(cf: *const c_void) -> *const c_void;
+            fn CFGetRetainCount(cf: *const c_void) -> isize;
+        }
+        let Ok(enc) = VtEncoder::new(64, 64, 30.0, 1_000_000, false, crate::DEFAULT_MAX_QP) else {
+            eprintln!("skip: no VideoToolbox H.264 encoder");
+            return;
+        };
+        let session = enc.session;
+        unsafe { CFRetain(session) };
+        drop(enc);
+        let left = unsafe { CFGetRetainCount(session) };
+        unsafe { CFRelease(session) };
+        assert_eq!(left, 1, "VtEncoder leaked its VTCompressionSession");
+    }
+
     #[test]
     fn interleave_uv_rows_with_padding() {
         let u = [1u8, 2, 3, 4];

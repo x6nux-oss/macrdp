@@ -11,9 +11,10 @@ use crate::color_convert::VImageConverter;
 use crate::{Avc444EncodedFrame, EncodedFrame, VideoEncoder};
 
 pub struct OpenH264Encoder {
+    /// One encoder for both AVC444 views: the client feeds main and aux into a single H.264
+    /// decoder (MS-RDPEGFX: both MUST come from the same encoder), so a second encoder's
+    /// SPS/IDR/frame_num would reset or corrupt that decoder's reference chain.
     encoder: Encoder,
-    /// Auxiliary encoder for AVC444 chroma stream
-    encoder_aux: Option<Encoder>,
     width: u32,
     height: u32,
     force_keyframe: bool,
@@ -54,7 +55,7 @@ impl Yuv444SplitBufs {
     }
 }
 
-fn create_oh264_encoder(fps: f32, bitrate: u32, max_qp: u8) -> Result<Encoder> {
+fn create_oh264_encoder(fps: f32, bitrate: u32, max_qp: u8, mode_444: bool) -> Result<Encoder> {
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8) as u16;
     // Screen/text tuned: low QP floor keeps glyph edges crisp, no AQ (it smears flat UI regions),
     // no background detection (static desktop must not be classified as "background" and starved).
@@ -68,7 +69,10 @@ fn create_oh264_encoder(fps: f32, bitrate: u32, max_qp: u8) -> Result<Encoder> {
         .skip_frames(false)
         // Window switches must not force an IDR (bitrate spike); GOP/force_keyframe handle refresh.
         .scene_change_detect(false)
-        .usage_type(openh264::encoder::UsageType::ScreenContentRealTime)
+        // AVC444 alternates main/aux views in this one encoder; screen-content mode force-enables
+        // scene-change detection, which turns every alternation into an IDR. Camera mode honours
+        // `scene_change_detect(false)` and keeps P-frames.
+        .usage_type(if mode_444 { openh264::encoder::UsageType::CameraVideoRealTime } else { openh264::encoder::UsageType::ScreenContentRealTime })
         .complexity(openh264::encoder::Complexity::Medium)
         .intra_frame_period(openh264::encoder::IntraFramePeriod::from_num_frames(fps as u32 * 10))
         .long_term_reference(true)
@@ -81,17 +85,10 @@ fn create_oh264_encoder(fps: f32, bitrate: u32, max_qp: u8) -> Result<Encoder> {
 impl OpenH264Encoder {
     pub fn new(width: u32, height: u32, fps: f32, bitrate: u32, mode_444: bool, max_qp: u8) -> Result<Self> {
 
-        let encoder = create_oh264_encoder(fps, bitrate, max_qp)?;
-
-        // AVC444: create auxiliary encoder with 70% bitrate
-        let encoder_aux = if mode_444 {
-            let aux_bitrate = (bitrate as f64 * 0.7) as u32;
-            let aux = create_oh264_encoder(fps, aux_bitrate, max_qp)?;
-            tracing::info!(aux_bitrate_mbps = aux_bitrate as f64 / 1_000_000.0, "AVC444 auxiliary OpenH264 encoder created");
-            Some(aux)
-        } else {
-            None
-        };
+        // AVC444 pushes main + aux through the encoder per captured frame: twice the frames,
+        // twice the bits (same as the VT session, see `session_rate`).
+        let (rate_fps, rate_bps) = session_rate(fps, bitrate, mode_444);
+        let encoder = create_oh264_encoder(rate_fps, rate_bps, max_qp, mode_444)?;
 
         let vimage = VImageConverter::new()
             .map_err(|e| tracing::warn!("vImage init failed, using scalar fallback: {e}"))
@@ -113,7 +110,6 @@ impl OpenH264Encoder {
 
         Ok(Self {
             encoder,
-            encoder_aux,
             width,
             height,
             force_keyframe: false,
@@ -126,6 +122,11 @@ impl OpenH264Encoder {
             last_src: (0, 0),
         })
     }
+}
+
+/// Encoder (frame rate, bitrate): AVC444 runs main + aux through one encoder, so both double.
+fn session_rate(fps: f32, bitrate: u32, mode_444: bool) -> (f32, u32) {
+    if mode_444 { (fps * 2.0, bitrate.saturating_mul(2)) } else { (fps, bitrate) }
 }
 
 /// Convert BGRA to YUV420 into an encoder-sized buffer (handles padding).
@@ -233,8 +234,6 @@ impl VideoEncoder for OpenH264Encoder {
     }
 
     fn encode_bgra_444(&mut self, data: &[u8], width: u32, height: u32, stride: usize) -> Result<Avc444EncodedFrame> {
-        let encoder_aux = self.encoder_aux.as_mut()
-            .ok_or_else(|| anyhow::anyhow!("AVC444 not enabled: no auxiliary encoder"))?;
         let bufs = self.yuv444_bufs.as_mut()
             .ok_or_else(|| anyhow::anyhow!("AVC444 not enabled: no YUV444 buffers"))?;
 
@@ -257,7 +256,6 @@ impl VideoEncoder for OpenH264Encoder {
 
         if self.force_keyframe {
             self.encoder.force_intra_frame();
-            encoder_aux.force_intra_frame();
             self.force_keyframe = false;
         }
 
@@ -269,7 +267,11 @@ impl VideoEncoder for OpenH264Encoder {
         main_bitstream.write_vec(&mut self.nal_buf);
         let main_nal = Bytes::copy_from_slice(&self.nal_buf);
 
-        let aux_bitstream = encoder_aux.encode(&frame_slices(&bufs.aux_view))
+        // Keep both views in sync: an IDR main view is followed by an IDR aux view.
+        if main_keyframe {
+            self.encoder.force_intra_frame();
+        }
+        let aux_bitstream = self.encoder.encode(&frame_slices(&bufs.aux_view))
             .context("OpenH264 aux encode failed")?;
         let aux_keyframe = matches!(aux_bitstream.frame_type(), FrameType::IDR | FrameType::I);
         self.nal_buf.clear();
@@ -306,11 +308,12 @@ impl VideoEncoder for OpenH264Encoder {
             return;
         }
         self.target_bitrate = bitrate_bps;
+        let (_, rate_bps) = session_rate(0.0, bitrate_bps, self.mode_444);
         unsafe {
             let raw = self.encoder.raw_api();
             let mut bitrate_info = openh264_sys2::SBitrateInfo {
                 iLayer: openh264_sys2::SPATIAL_LAYER_ALL,
-                iBitrate: bitrate_bps as i32,
+                iBitrate: rate_bps as i32,
             };
             let ret = raw.set_option(
                 openh264_sys2::ENCODER_OPTION_BITRATE,
@@ -320,20 +323,6 @@ impl VideoEncoder for OpenH264Encoder {
                 tracing::warn!(ret, "OpenH264 set_option(BITRATE) failed, bitrate change deferred");
             } else {
                 tracing::info!(bitrate_mbps = bitrate_bps as f64 / 1_000_000.0, "Bitrate updated via SetOption");
-            }
-        }
-        if let Some(ref mut aux) = self.encoder_aux {
-            let aux_bitrate = (bitrate_bps as f64 * 0.7) as u32;
-            unsafe {
-                let raw = aux.raw_api();
-                let mut bitrate_info = openh264_sys2::SBitrateInfo {
-                    iLayer: openh264_sys2::SPATIAL_LAYER_ALL,
-                    iBitrate: aux_bitrate as i32,
-                };
-                let _ = raw.set_option(
-                    openh264_sys2::ENCODER_OPTION_BITRATE,
-                    &mut bitrate_info as *mut _ as *mut c_void,
-                );
             }
         }
     }
@@ -358,6 +347,38 @@ mod tests {
         let frame = encoder.encode_bgra(&bgra, 64, 64, 64 * 4).unwrap();
         assert!(!frame.data.is_empty());
         assert!(frame.is_keyframe);
+    }
+
+    /// The client decodes main and aux views with one H.264 decoder, in order. Two encoders
+    /// (one per view) would make the second main P-frame predict from the aux picture.
+    #[test]
+    fn avc444_views_decode_through_one_decoder() {
+        use openh264::decoder::Decoder;
+        use openh264::formats::YUVSource;
+        let (w, h) = (64u32, 64u32);
+        let mut enc = OpenH264Encoder::new(w, h, 30.0, 4_000_000, true, crate::DEFAULT_MAX_QP).unwrap();
+        // Saturated colour gradients: the aux view (chroma residual) looks nothing like the luma.
+        let mut bgra = vec![0u8; (w * h * 4) as usize];
+        for (i, px) in bgra.chunks_mut(4).enumerate() {
+            let (x, y) = ((i as u32 % w) as u8, (i as u32 / w) as u8);
+            px.copy_from_slice(&[x.wrapping_mul(4), 255 - y.wrapping_mul(4), x ^ y, 255]);
+        }
+        let f1 = enc.encode_bgra_444(&bgra, w, h, (w * 4) as usize).unwrap();
+        let f2 = enc.encode_bgra_444(&bgra, w, h, (w * 4) as usize).unwrap();
+        assert!(f1.main_view.is_keyframe);
+        assert!(!f2.main_view.is_keyframe, "alternating views must not turn every frame into an IDR");
+
+        let mut dec = Decoder::new().unwrap();
+        let luma = |d: &mut Decoder, nal: &[u8]| -> Vec<u8> {
+            let yuv = d.decode(nal).unwrap().expect("decoded picture");
+            let stride = yuv.strides().0;
+            yuv.y().chunks(stride).take(h as usize).flat_map(|r| r[..w as usize].to_vec()).collect()
+        };
+        let main1 = luma(&mut dec, &f1.main_view.data);
+        luma(&mut dec, &f1.aux_view.unwrap().data);
+        let main2 = luma(&mut dec, &f2.main_view.data);
+        let max_diff = main1.iter().zip(&main2).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        assert!(max_diff <= 8, "main P-frame decoded against the wrong reference (max diff {max_diff})");
     }
 
     #[test]
